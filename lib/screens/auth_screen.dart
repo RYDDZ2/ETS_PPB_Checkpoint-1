@@ -76,6 +76,9 @@ class _AuthScreenState extends State<AuthScreen>
               ),
               child: TabBar(
                 controller: _tabController,
+                indicatorSize: TabBarIndicatorSize.tab,
+                labelPadding: EdgeInsets.zero,
+                indicatorPadding: EdgeInsets.zero,
                 indicator: BoxDecoration(
                   color: const Color(0xFFFF6B35),
                   borderRadius: BorderRadius.circular(10),

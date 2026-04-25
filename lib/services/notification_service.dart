@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:timezone/data/latest.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
 
@@ -22,6 +24,7 @@ class NotificationService {
 
   Future<void> initialize() async {
     tz.initializeTimeZones();
+    await _configureLocalTimezone();
 
     const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
     const iosInit = DarwinInitializationSettings(
@@ -36,6 +39,11 @@ class NotificationService {
     );
 
     await _createChannels();
+  }
+
+  Future<void> _configureLocalTimezone() async {
+    final timeZoneInfo = await FlutterTimezone.getLocalTimezone();
+    tz.setLocalLocation(tz.getLocation(timeZoneInfo.identifier));
   }
 
   Future<void> _createChannels() async {
@@ -117,6 +125,36 @@ class NotificationService {
     );
   }
 
+  Future<void> _scheduleWithFallback({
+    required int id,
+    required String title,
+    required String body,
+    required tz.TZDateTime scheduledTime,
+    required NotificationDetails details,
+    DateTimeComponents? matchDateTimeComponents,
+  }) async {
+    Future<void> schedule(AndroidScheduleMode mode) {
+      return _plugin.zonedSchedule(
+        id,
+        title,
+        body,
+        scheduledTime,
+        details,
+        androidScheduleMode: mode,
+        uiLocalNotificationDateInterpretation:
+            UILocalNotificationDateInterpretation.absoluteTime,
+        matchDateTimeComponents: matchDateTimeComponents,
+      );
+    }
+
+    try {
+      await schedule(AndroidScheduleMode.exactAllowWhileIdle);
+    } on PlatformException catch (e) {
+      if (e.code != 'exact_alarms_not_permitted') rethrow;
+      await schedule(AndroidScheduleMode.inexactAllowWhileIdle);
+    }
+  }
+
   /// Schedule rest timer notification
   Future<void> scheduleRestTimer({
     required int seconds,
@@ -124,18 +162,18 @@ class NotificationService {
   }) async {
     await _plugin.cancel(restTimerId);
 
-    final scheduledTime = tz.TZDateTime.now(
-      tz.local,
-    ).add(Duration(seconds: seconds));
+    final scheduledTime = tz.TZDateTime.now(tz.local).add(
+      Duration(seconds: seconds),
+    );
 
-    await _plugin.zonedSchedule(
-      restTimerId,
-      '💪 Rest selesai!',
-      exerciseName != null
+    await _scheduleWithFallback(
+      id: restTimerId,
+      title: '💪 Rest selesai!',
+      body: exerciseName != null
           ? 'Waktunya lanjut $exerciseName!'
           : 'Waktunya lanjut set berikutnya!',
-      scheduledTime,
-      NotificationDetails(
+      scheduledTime: scheduledTime,
+      details: NotificationDetails(
         android: AndroidNotificationDetails(
           _restTimerChannelId,
           'Rest Timer',
@@ -150,9 +188,6 @@ class NotificationService {
           presentSound: true,
         ),
       ),
-      androidScheduleMode: AndroidScheduleMode.inexact, // Tetap gunakan inexact
-      uiLocalNotificationDateInterpretation:
-          UILocalNotificationDateInterpretation.absoluteTime,
     );
   }
 
@@ -163,50 +198,57 @@ class NotificationService {
 
   // ─────────────────────────── GYM REMINDER ────────────────────────────────
 
-  /// Schedule daily gym reminder
-  Future<void> scheduleDailyGymReminder({
-    required int hour,
-    required int minute,
+  /// Schedule a gym reminder after a custom duration.
+  Future<void> scheduleGymReminderAfter({
+    required int hours,
+    required int minutes,
+    required int seconds,
   }) async {
     await cancelGymReminder();
 
-    final now = tz.TZDateTime.now(tz.local);
-    var scheduledTime = tz.TZDateTime(
-      tz.local,
-      now.year,
-      now.month,
-      now.day,
-      hour,
-      minute,
-    );
-
-    // If time already passed today, schedule for tomorrow
-    if (scheduledTime.isBefore(now)) {
-      scheduledTime = scheduledTime.add(const Duration(days: 1));
+    final totalSeconds = (hours * 3600) + (minutes * 60) + seconds;
+    if (totalSeconds <= 0) {
+      throw ArgumentError.value(
+        totalSeconds,
+        'duration',
+        'Reminder duration must be greater than zero',
+      );
     }
 
-    await _plugin.zonedSchedule(
-      gymReminderId,
-      '🏋️ Waktunya Gym!',
-      'Jangan skip hari ini bro, tetap konsisten!',
-      scheduledTime,
-      NotificationDetails(
+    final scheduledTime = tz.TZDateTime.now(tz.local).add(
+      Duration(seconds: totalSeconds),
+    );
+
+    await _scheduleWithFallback(
+      id: gymReminderId,
+      title: '🏋️ Waktunya Gym!',
+      body: 'Jangan skip hari ini bro, tetap konsisten!',
+      scheduledTime: scheduledTime,
+      details: const NotificationDetails(
         android: AndroidNotificationDetails(
           _gymReminderChannelId,
           'Gym Reminder',
-          channelDescription: 'Daily gym reminder',
+          channelDescription: 'Custom gym reminder',
           importance: Importance.defaultImportance,
           icon: '@mipmap/ic_launcher',
         ),
-        iOS: const DarwinNotificationDetails(
+        iOS: DarwinNotificationDetails(
           presentAlert: true,
           presentSound: true,
         ),
       ),
-      androidScheduleMode: AndroidScheduleMode.inexact,
-      uiLocalNotificationDateInterpretation:
-          UILocalNotificationDateInterpretation.absoluteTime,
-      matchDateTimeComponents: DateTimeComponents.time, // Repeat daily
+    );
+  }
+
+  @Deprecated('Use scheduleGymReminderAfter instead.')
+  Future<void> scheduleDailyGymReminder({
+    required int hour,
+    required int minute,
+  }) {
+    return scheduleGymReminderAfter(
+      hours: hour,
+      minutes: minute,
+      seconds: 0,
     );
   }
 

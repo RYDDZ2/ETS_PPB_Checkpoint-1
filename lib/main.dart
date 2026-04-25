@@ -130,7 +130,10 @@ class AuthGate extends StatelessWidget {
         }
 
         if (user != null) {
-          return HomeScreen(key: ValueKey(user.uid));
+          return HomeScreen(
+            key: ValueKey(user.uid),
+            userId: user.uid,
+          );
         }
 
         return const AuthScreen();

@@ -1,4 +1,4 @@
-import 'dart:typed_data';
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -13,7 +13,9 @@ import 'active_workout_screen.dart';
 import 'progress_cam_screen.dart';
 
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
+  final String userId;
+
+  const HomeScreen({super.key, required this.userId});
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -27,7 +29,11 @@ class _HomeScreenState extends State<HomeScreen> {
     return Scaffold(
       body: IndexedStack(
         index: _currentIndex,
-        children: const [_DashboardTab(), _HistoryTab(), _ProfileTab()],
+        children: [
+          _DashboardTab(userId: widget.userId),
+          _HistoryTab(userId: widget.userId),
+          _ProfileTab(userId: widget.userId),
+        ],
       ),
       bottomNavigationBar: Container(
         decoration: const BoxDecoration(
@@ -71,12 +77,13 @@ class _HomeScreenState extends State<HomeScreen> {
 // ─── DASHBOARD TAB ────────────────────────────────────────────────────────────
 
 class _DashboardTab extends StatelessWidget {
-  const _DashboardTab();
+  final String userId;
+
+  const _DashboardTab({required this.userId});
 
   @override
   Widget build(BuildContext context) {
-    final uid = FirebaseAuthService.instance.currentUserId;
-    if (uid == null) return const SizedBox.shrink();
+    final uid = userId;
 
     return SafeArea(
       child: StreamBuilder<UserModel?>(
@@ -437,12 +444,13 @@ class _WorkoutPlanCard extends StatelessWidget {
 // ─── HISTORY TAB ──────────────────────────────────────────────────────────────
 
 class _HistoryTab extends StatelessWidget {
-  const _HistoryTab();
+  final String userId;
+
+  const _HistoryTab({required this.userId});
 
   @override
   Widget build(BuildContext context) {
-    final uid = FirebaseAuthService.instance.currentUserId;
-    if (uid == null) return const SizedBox.shrink();
+    final uid = userId;
 
     return SafeArea(
       child: Column(
@@ -739,15 +747,66 @@ class _Chip extends StatelessWidget {
 // ─── PROFILE TAB ──────────────────────────────────────────────────────────────
 
 class _ProfileTab extends StatefulWidget {
-  const _ProfileTab();
+  final String userId;
+
+  const _ProfileTab({required this.userId});
 
   @override
   State<_ProfileTab> createState() => _ProfileTabState();
 }
 
 class _ProfileTabState extends State<_ProfileTab> {
-  TimeOfDay _reminderTime = const TimeOfDay(hour: 17, minute: 0);
+  final _reminderHoursCtrl = TextEditingController(text: '0');
+  final _reminderMinutesCtrl = TextEditingController(text: '30');
+  final _reminderSecondsCtrl = TextEditingController(text: '0');
   bool _reminderEnabled = false;
+  Timer? _reminderTimer;
+
+  @override
+  void dispose() {
+    _reminderTimer?.cancel();
+    _reminderHoursCtrl.dispose();
+    _reminderMinutesCtrl.dispose();
+    _reminderSecondsCtrl.dispose();
+    super.dispose();
+  }
+
+  int _parseDurationValue(TextEditingController controller) {
+    return int.tryParse(controller.text.trim()) ?? 0;
+  }
+
+  int get _reminderDurationSeconds =>
+      (_parseDurationValue(_reminderHoursCtrl) * 3600) +
+      (_parseDurationValue(_reminderMinutesCtrl) * 60) +
+      _parseDurationValue(_reminderSecondsCtrl);
+
+  String get _reminderDurationLabel =>
+      '${_parseDurationValue(_reminderHoursCtrl)} jam '
+      '${_parseDurationValue(_reminderMinutesCtrl)} menit '
+      '${_parseDurationValue(_reminderSecondsCtrl)} detik';
+
+  Future<void> _scheduleReminderTimer() async {
+    final totalSeconds = _reminderDurationSeconds;
+    if (totalSeconds <= 0) {
+      throw ArgumentError.value(
+        totalSeconds,
+        'duration',
+        'Reminder duration must be greater than zero',
+      );
+    }
+
+    _reminderTimer?.cancel();
+    _reminderTimer = Timer.periodic(Duration(seconds: totalSeconds), (
+      timer,
+    ) async {
+      if (!mounted || !_reminderEnabled) {
+        timer.cancel();
+        return;
+      }
+
+      await NotificationService.instance.showMotivationNotification();
+    });
+  }
 
   Future<void> _showImageSourceActionSheet(UserModel user) async {
     showModalBottomSheet(
@@ -894,8 +953,7 @@ class _ProfileTabState extends State<_ProfileTab> {
 
   @override
   Widget build(BuildContext context) {
-    final uid = FirebaseAuthService.instance.currentUserId;
-    if (uid == null) return const SizedBox.shrink();
+    final uid = widget.userId;
 
     return SafeArea(
       child: StreamBuilder<UserModel?>(
@@ -1089,23 +1147,12 @@ class _ProfileTabState extends State<_ProfileTab> {
                     const Icon(Icons.alarm, color: Color(0xFFFF6B35)),
                     const SizedBox(width: 12),
                     Expanded(
-                      child: GestureDetector(
-                        onTap: () async {
-                          final t = await showTimePicker(
-                            context: context,
-                            initialTime: _reminderTime,
-                          );
-                          if (t != null) {
-                            setState(() => _reminderTime = t);
-                          }
-                        },
-                        child: Text(
-                          _reminderTime.format(context),
-                          style: GoogleFonts.barlow(
-                            fontSize: 20,
-                            fontWeight: FontWeight.w700,
-                            color: Colors.white,
-                          ),
+                      child: Text(
+                        _reminderDurationLabel,
+                        style: GoogleFonts.barlow(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w700,
+                          color: Colors.white,
                         ),
                       ),
                     ),
@@ -1113,62 +1160,106 @@ class _ProfileTabState extends State<_ProfileTab> {
                       value: _reminderEnabled,
                       activeColor: const Color(0xFFFF6B35),
                       onChanged: (v) async {
-                        if (v) {
-                          final granted =
-                              await NotificationService.instance
-                                  .requestPermission();
-                          if (!granted) {
-                            if (!mounted) return;
-                            setState(() => _reminderEnabled = false);
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text(
-                                  'Izin notifikasi belum aktif. Aktifkan dulu supaya reminder jalan.',
-                                ),
-                                backgroundColor: Colors.orange,
-                                behavior: SnackBarBehavior.floating,
+                        if (!v) {
+                          _reminderTimer?.cancel();
+                          await NotificationService.instance.cancelGymReminder();
+                          if (!mounted) return;
+                          setState(() => _reminderEnabled = false);
+                          return;
+                        }
+
+                        final totalSeconds = _reminderDurationSeconds;
+                        if (totalSeconds <= 0) {
+                          if (!mounted) return;
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('Isi durasi reminder dulu, minimal 1 detik.'),
+                              backgroundColor: Colors.orange,
+                              behavior: SnackBarBehavior.floating,
+                            ),
+                          );
+                          return;
+                        }
+
+                        final granted =
+                            await NotificationService.instance.requestPermission();
+                        if (!granted) {
+                          if (!mounted) return;
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text(
+                                'Izin notifikasi belum aktif. Aktifkan dulu supaya reminder jalan.',
                               ),
-                            );
-                            return;
-                          }
+                              backgroundColor: Colors.orange,
+                              behavior: SnackBarBehavior.floating,
+                            ),
+                          );
+                          return;
                         }
 
                         try {
+                          await NotificationService.instance.cancelGymReminder();
+                          await _scheduleReminderTimer();
                           if (!mounted) return;
-                          setState(() => _reminderEnabled = v);
-                          if (v) {
-                            await NotificationService.instance
-                                .scheduleDailyGymReminder(
-                                  hour: _reminderTime.hour,
-                                  minute: _reminderTime.minute,
-                                );
-                            if (context.mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(
-                                  content: Text(
-                                    'Reminder diset jam ${_reminderTime.format(context)}',
-                                  ),
-                                  behavior: SnackBarBehavior.floating,
-                                ),
-                              );
-                            }
-                          } else {
-                            await NotificationService.instance
-                                .cancelGymReminder();
-                          }
+                          setState(() => _reminderEnabled = true);
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(
+                                'Reminder aktif, notifikasi akan muncul dalam $_reminderDurationLabel.',
+                              ),
+                              behavior: SnackBarBehavior.floating,
+                            ),
+                          );
                         } catch (e) {
                           if (!mounted) return;
-                          setState(() => _reminderEnabled = !v);
-                          if (context.mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                content: Text('Gagal mengatur reminder: $e'),
-                                backgroundColor: Colors.red,
-                              ),
-                            );
-                          }
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text('Gagal mengatur reminder: $e'),
+                              backgroundColor: Colors.red,
+                            ),
+                          );
                         }
                       },
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextFormField(
+                        controller: _reminderHoursCtrl,
+                        keyboardType: TextInputType.number,
+                        style: const TextStyle(color: Colors.white),
+                        decoration: const InputDecoration(
+                          labelText: 'Jam',
+                          suffixText: 'j',
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: TextFormField(
+                        controller: _reminderMinutesCtrl,
+                        keyboardType: TextInputType.number,
+                        style: const TextStyle(color: Colors.white),
+                        decoration: const InputDecoration(
+                          labelText: 'Menit',
+                          suffixText: 'm',
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: TextFormField(
+                        controller: _reminderSecondsCtrl,
+                        keyboardType: TextInputType.number,
+                        style: const TextStyle(color: Colors.white),
+                        decoration: const InputDecoration(
+                          labelText: 'Detik',
+                          suffixText: 'd',
+                        ),
+                      ),
                     ),
                   ],
                 ),
