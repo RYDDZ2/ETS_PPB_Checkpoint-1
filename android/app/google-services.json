@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "762568181797",
+    "project_id": "gymform2",
+    "storage_bucket": "gymform2.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:762568181797:android:4bbd393bf4dcab691957cc",
+        "android_client_info": {
+          "package_name": "com.example.gymform3"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCD7Lq8DbD7H-LdpZw42rbuH_DUSOBFyKo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
