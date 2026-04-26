@@ -19,8 +19,12 @@ class NotificationService {
 
   // Notification IDs
   static const int restTimerId = 1;
-  static const int gymReminderId = 2;
+  static const int gymReminderId = 2; // kept for legacy cancel
   static const int motivationId = 3;
+
+  // Multiple one-shot alarm slots untuk gym reminder
+  static const int _gymReminderBaseId = 200;
+  static const int _gymReminderSlots = 10;
 
   Future<void> initialize() async {
     tz.initializeTimeZones();
@@ -60,7 +64,9 @@ class NotificationService {
       _gymReminderChannelId,
       'Gym Reminder',
       description: 'Reminder jadwal gym harian',
-      importance: Importance.defaultImportance,
+      importance: Importance.high,
+      playSound: true,
+      enableVibration: true,
     );
 
     const motivationChannel = AndroidNotificationChannel(
@@ -70,10 +76,8 @@ class NotificationService {
       importance: Importance.low,
     );
 
-    final androidPlugin = _plugin
-        .resolvePlatformSpecificImplementation<
-          AndroidFlutterLocalNotificationsPlugin
-        >();
+    final androidPlugin = _plugin.resolvePlatformSpecificImplementation<
+        AndroidFlutterLocalNotificationsPlugin>();
 
     await androidPlugin?.createNotificationChannel(restChannel);
     await androidPlugin?.createNotificationChannel(reminderChannel);
@@ -87,12 +91,27 @@ class NotificationService {
   // ─────────────────────────── REQUEST PERMISSION ──────────────────────────
 
   Future<bool> requestPermission() async {
-    final android = _plugin
-        .resolvePlatformSpecificImplementation<
-          AndroidFlutterLocalNotificationsPlugin
-        >();
+    final android = _plugin.resolvePlatformSpecificImplementation<
+        AndroidFlutterLocalNotificationsPlugin>();
     final granted = await android?.requestNotificationsPermission();
     return granted ?? false;
+  }
+
+  Future<bool> requestReminderPermissions() async {
+    final notificationGranted = await requestPermission();
+    final android = _plugin.resolvePlatformSpecificImplementation<
+        AndroidFlutterLocalNotificationsPlugin>();
+
+    if (android != null) {
+      final exactGranted = await android.requestExactAlarmsPermission();
+      if (exactGranted == false) {
+        debugPrint(
+          'Exact alarm permission not granted; falling back to inexact scheduling.',
+        );
+      }
+    }
+
+    return notificationGranted;
   }
 
   // ─────────────────────────── REST TIMER ──────────────────────────────────
@@ -198,44 +217,88 @@ class NotificationService {
 
   // ─────────────────────────── GYM REMINDER ────────────────────────────────
 
-  /// Schedule a gym reminder after a custom duration.
-  Future<void> scheduleGymReminderAfter({
-    required int hours,
-    required int minutes,
-    required int seconds,
-  }) async {
-    await cancelGymReminder();
-
-    final totalSeconds = (hours * 3600) + (minutes * 60) + seconds;
-    if (totalSeconds <= 0) {
-      throw ArgumentError.value(
-        totalSeconds,
-        'duration',
-        'Reminder duration must be greater than zero',
-      );
-    }
-
-    final scheduledTime = tz.TZDateTime.now(tz.local).add(
-      Duration(seconds: totalSeconds),
-    );
-
-    await _scheduleWithFallback(
-      id: gymReminderId,
-      title: '🏋️ Waktunya Gym!',
-      body: 'Jangan skip hari ini bro, tetap konsisten!',
-      scheduledTime: scheduledTime,
-      details: const NotificationDetails(
+  /// Tampilkan notifikasi gym reminder sekarang (untuk foreground / manual trigger)
+  Future<void> showGymReminderNotification() async {
+    await _plugin.show(
+      gymReminderId,
+      '🏋️ Waktunya Gym!',
+      'Jangan skip hari ini bro, tetap konsisten!',
+      const NotificationDetails(
         android: AndroidNotificationDetails(
           _gymReminderChannelId,
           'Gym Reminder',
           channelDescription: 'Custom gym reminder',
-          importance: Importance.defaultImportance,
+          importance: Importance.high,
+          priority: Priority.high,
           icon: '@mipmap/ic_launcher',
         ),
         iOS: DarwinNotificationDetails(
           presentAlert: true,
           presentSound: true,
         ),
+      ),
+    );
+  }
+
+  /// Schedule [_gymReminderSlots] one-shot alarms masing-masing berjarak
+  /// [interval] dari yang sebelumnya — dimulai dari sekarang + interval.
+  ///
+  /// Pendekatan ini jauh lebih reliable daripada [periodicallyShowWithDuration]
+  /// karena setiap alarm sudah terdaftar di Android AlarmManager secara
+  /// independen, sehingga tidak terputus meski app di-kill.
+  Future<void> scheduleGymReminderPeriodically({
+    required Duration interval,
+  }) async {
+    await cancelGymReminder();
+
+    if (interval.inSeconds <= 0) {
+      throw ArgumentError.value(
+        interval,
+        'interval',
+        'Reminder interval must be greater than zero',
+      );
+    }
+
+    final now = tz.TZDateTime.now(tz.local);
+
+    const details = NotificationDetails(
+      android: AndroidNotificationDetails(
+        _gymReminderChannelId,
+        'Gym Reminder',
+        channelDescription: 'Custom gym reminder',
+        importance: Importance.high,
+        priority: Priority.high,
+        icon: '@mipmap/ic_launcher',
+      ),
+      iOS: DarwinNotificationDetails(
+        presentAlert: true,
+        presentSound: true,
+      ),
+    );
+
+    for (int i = 1; i <= _gymReminderSlots; i++) {
+      final scheduledTime = now.add(interval * i);
+      await _scheduleWithFallback(
+        id: _gymReminderBaseId + i,
+        title: '🏋️ Waktunya Gym!',
+        body: 'Jangan skip hari ini bro, tetap konsisten!',
+        scheduledTime: scheduledTime,
+        details: details,
+      );
+    }
+  }
+
+  /// Schedule a gym reminder after a custom duration.
+  Future<void> scheduleGymReminderAfter({
+    required int hours,
+    required int minutes,
+    required int seconds,
+  }) {
+    return scheduleGymReminderPeriodically(
+      interval: Duration(
+        hours: hours,
+        minutes: minutes,
+        seconds: seconds,
       ),
     );
   }
@@ -252,8 +315,14 @@ class NotificationService {
     );
   }
 
+  /// Cancel semua slot gym reminder (termasuk legacy single ID).
   Future<void> cancelGymReminder() async {
+    // Cancel legacy single ID
     await _plugin.cancel(gymReminderId);
+    // Cancel semua one-shot slots
+    for (int i = 1; i <= _gymReminderSlots; i++) {
+      await _plugin.cancel(_gymReminderBaseId + i);
+    }
   }
 
   // ─────────────────────────── MOTIVATION ──────────────────────────────────

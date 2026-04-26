@@ -218,7 +218,11 @@ class _DashboardTab extends StatelessWidget {
                           ),
                           TextButton.icon(
                             onPressed: () => _showAddPlanDialog(context, uid),
-                            icon: const Icon(Icons.add, size: 16, color: Color(0xFFFF6B35)),
+                            icon: const Icon(
+                              Icons.add,
+                              size: 16,
+                              color: Color(0xFFFF6B35),
+                            ),
                             label: Text(
                               'Custom Plan',
                               style: GoogleFonts.barlow(
@@ -255,14 +259,25 @@ class _DashboardTab extends StatelessWidget {
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF141414),
-        title: Text('Custom Workout Plan', style: GoogleFonts.barlow(color: Colors.white, fontWeight: FontWeight.bold)),
+        title: Text(
+          'Custom Workout Plan',
+          style: GoogleFonts.barlow(
+            color: Colors.white,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
         content: TextField(
           controller: controller,
-          decoration: const InputDecoration(hintText: 'Nama Plan (misal: Abs Day)'),
+          decoration: const InputDecoration(
+            hintText: 'Nama Plan (misal: Abs Day)',
+          ),
           style: const TextStyle(color: Colors.white),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Batal')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Batal'),
+          ),
           ElevatedButton(
             onPressed: () {
               if (controller.text.trim().isEmpty) return;
@@ -424,7 +439,7 @@ class _WorkoutPlanCard extends StatelessWidget {
                     exercises.isEmpty
                         ? 'Buat latihan sendiri'
                         : exercises.take(3).join(', ') +
-                              (exercises.length > 3 ? '...' : ''),
+                            (exercises.length > 3 ? '...' : ''),
                     style: GoogleFonts.spaceGrotesk(
                       fontSize: 12,
                       color: const Color(0xFF666666),
@@ -613,7 +628,8 @@ class _WorkoutHistoryCard extends StatelessWidget {
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 itemCount: log.photoBase64List.length,
                 itemBuilder: (ctx, i) {
-                  final bytes = StorageService.base64ToBytes(log.photoBase64List[i]);
+                  final bytes =
+                      StorageService.base64ToBytes(log.photoBase64List[i]);
                   return Container(
                     width: 80,
                     height: 80,
@@ -713,7 +729,8 @@ class _WorkoutHistoryCard extends StatelessWidget {
               final newName = controller.text.trim();
               if (newName.isEmpty) return;
               Navigator.pop(ctx);
-              await FirestoreService.instance.updateWorkoutLog(log.copyWith(planName: newName));
+              await FirestoreService.instance
+                  .updateWorkoutLog(log.copyWith(planName: newName));
             },
             child: const Text('Simpan'),
           ),
@@ -805,16 +822,47 @@ class _ProfileTab extends StatefulWidget {
   State<_ProfileTab> createState() => _ProfileTabState();
 }
 
-class _ProfileTabState extends State<_ProfileTab> {
+class _ProfileTabState extends State<_ProfileTab> with WidgetsBindingObserver {
   final _reminderHoursCtrl = TextEditingController(text: '23');
   final _reminderMinutesCtrl = TextEditingController(text: '59');
   final _reminderSecondsCtrl = TextEditingController(text: '59');
-  bool _reminderEnabled = false;
-  Timer? _reminderTimer;
+  bool _isSavingReminder = false;
+  String? _lastSyncedReminderSignature;
+
+  // Signature berisi jam saat ini supaya _applyReminderMode dipanggil
+  // tiap app dibuka (bukan hanya saat settings berubah).
+  // Ini memastikan slot alarm selalu di-refresh setiap sesi buka app.
+  String? _lastAppliedReminderSignature;
+
+  UserModel? _currentReminderUser;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Reschedule saat app kembali ke foreground (resume dari background)
+    if (state == AppLifecycleState.resumed) {
+      final user = _currentReminderUser;
+      if (user == null) return;
+      // Reset signature supaya _applyReminderMode mau jalan lagi
+      _lastAppliedReminderSignature = null;
+      () async {
+        try {
+          await _applyReminderMode(user);
+        } catch (e) {
+          debugPrint('Failed to reschedule reminder on resume: $e');
+        }
+      }();
+    }
+  }
 
   @override
   void dispose() {
-    _reminderTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
     _reminderHoursCtrl.dispose();
     _reminderMinutesCtrl.dispose();
     _reminderSecondsCtrl.dispose();
@@ -835,41 +883,158 @@ class _ProfileTabState extends State<_ProfileTab> {
       '${_parseDurationValue(_reminderMinutesCtrl)} menit '
       '${_parseDurationValue(_reminderSecondsCtrl)} detik';
 
-  Future<void> _scheduleReminderTimer() async {
-    final totalSeconds = _reminderDurationSeconds;
-    if (totalSeconds <= 0) {
-      throw ArgumentError.value(
-        totalSeconds,
-        'duration',
-        'Reminder duration must be greater than zero',
-      );
+  void _syncReminderSettingsFromUser(UserModel user) {
+    final signature = '${user.reminderEnabled}:${user.reminderIntervalSeconds}';
+    _currentReminderUser = user;
+
+    if (_lastSyncedReminderSignature != signature) {
+      _lastSyncedReminderSignature = signature;
+
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        final interval = Duration(seconds: user.reminderIntervalSeconds);
+        _reminderHoursCtrl.text = interval.inHours.toString();
+        _reminderMinutesCtrl.text = interval.inMinutes.remainder(60).toString();
+        _reminderSecondsCtrl.text = interval.inSeconds.remainder(60).toString();
+      });
     }
 
-    _reminderTimer?.cancel();
-    _reminderTimer = Timer.periodic(Duration(seconds: totalSeconds), (
-      timer,
-    ) async {
-      if (!mounted || !_reminderEnabled) {
-        timer.cancel();
-        return;
+    () async {
+      try {
+        await _applyReminderMode(user);
+      } catch (e) {
+        debugPrint('Failed to sync gym reminder: $e');
+      }
+    }();
+  }
+
+  /// Terapkan mode reminder yang sesuai.
+  ///
+  /// Signature menyertakan [DateTime.now().hour] supaya method ini
+  /// dieksekusi ulang setiap jam — menjaga slot alarm selalu fresh.
+  Future<void> _applyReminderMode(UserModel user) async {
+    final hourBucket = DateTime.now().hour;
+    final targetSignature =
+        '${user.reminderEnabled}:${user.reminderIntervalSeconds}:$hourBucket';
+
+    if (_lastAppliedReminderSignature == targetSignature) return;
+    _lastAppliedReminderSignature = targetSignature;
+    _currentReminderUser = user;
+
+    if (!user.reminderEnabled) {
+      await NotificationService.instance.cancelGymReminder();
+      return;
+    }
+
+    // Reschedule 10 one-shot alarms ke depan setiap kali dipanggil.
+    // AlarmManager OS yang handle firing-nya — tidak butuh app hidup.
+    await NotificationService.instance.scheduleGymReminderPeriodically(
+      interval: user.reminderInterval,
+    );
+  }
+
+  Future<void> _saveReminderSettings(
+    UserModel user, {
+    required bool enabled,
+  }) async {
+    if (_isSavingReminder) return;
+
+    final totalSeconds = _reminderDurationSeconds;
+    final intervalSeconds =
+        totalSeconds > 0 ? totalSeconds : user.reminderIntervalSeconds;
+
+    if (enabled && totalSeconds <= 0) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Isi durasi reminder dulu, minimal 1 detik.'),
+          backgroundColor: Colors.orange,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
+
+    if (mounted) setState(() => _isSavingReminder = true);
+
+    try {
+      if (enabled) {
+        final granted =
+            await NotificationService.instance.requestReminderPermissions();
+        if (!granted) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Izin notifikasi belum aktif. Aktifkan dulu supaya reminder jalan.',
+              ),
+              backgroundColor: Colors.orange,
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+          return;
+        }
       }
 
-      await NotificationService.instance.showMotivationNotification();
-    });
+      final updatedUser = user.copyWith(
+        reminderEnabled: enabled,
+        reminderIntervalSeconds: intervalSeconds,
+      );
+
+      await FirestoreService.instance.updateUserProfile(user.uid, {
+        'reminderEnabled': enabled,
+        'reminderIntervalSeconds': intervalSeconds,
+      });
+
+      // Reset signature supaya _applyReminderMode pasti jalan dengan data baru
+      _lastAppliedReminderSignature = null;
+      await _applyReminderMode(updatedUser);
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            enabled
+                ? 'Reminder aktif dan tersimpan. Notifikasi akan muncul setiap $_reminderDurationLabel.'
+                : 'Reminder dimatikan dan perubahan tersimpan.',
+          ),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Gagal menyimpan reminder: $e'),
+          backgroundColor: Colors.red,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _isSavingReminder = false);
+    }
   }
 
   Future<void> _showImageSourceActionSheet(UserModel user) async {
     showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF141414),
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
       builder: (context) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             ListTile(
-              leading: const Icon(Icons.camera_alt_outlined, color: Color(0xFFFF6B35)),
-              title: const Text('Ambil Foto', style: TextStyle(color: Colors.white)),
+              leading: const Icon(
+                Icons.camera_alt_outlined,
+                color: Color(0xFFFF6B35),
+              ),
+              title: const Text(
+                'Ambil Foto',
+                style: TextStyle(color: Colors.white),
+              ),
               onTap: () async {
                 Navigator.pop(context);
                 final file = await StorageService.instance.pickFromCamera();
@@ -877,8 +1042,14 @@ class _ProfileTabState extends State<_ProfileTab> {
               },
             ),
             ListTile(
-              leading: const Icon(Icons.photo_library_outlined, color: Color(0xFFFF6B35)),
-              title: const Text('Pilih dari Galeri', style: TextStyle(color: Colors.white)),
+              leading: const Icon(
+                Icons.photo_library_outlined,
+                color: Color(0xFFFF6B35),
+              ),
+              title: const Text(
+                'Pilih dari Galeri',
+                style: TextStyle(color: Colors.white),
+              ),
               onTap: () async {
                 Navigator.pop(context);
                 final file = await StorageService.instance.pickFromGallery();
@@ -894,9 +1065,12 @@ class _ProfileTabState extends State<_ProfileTab> {
   Future<void> _updateProfilePhoto(UserModel user, File file) async {
     final base64 = await StorageService.instance.fileToBase64(file);
     if (base64 != null) {
-      await FirestoreService.instance.updateUserProfile(user.uid, {'photoBase64': base64});
+      await FirestoreService.instance
+          .updateUserProfile(user.uid, {'photoBase64': base64});
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Foto profil diperbarui!')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Foto profil diperbarui!')),
+        );
       }
     }
   }
@@ -908,7 +1082,9 @@ class _ProfileTabState extends State<_ProfileTab> {
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Izin notifikasi belum aktif. Aktifkan dulu untuk test notifikasi.'),
+            content: Text(
+              'Izin notifikasi belum aktif. Aktifkan dulu untuk test notifikasi.',
+            ),
             backgroundColor: Colors.orange,
             behavior: SnackBarBehavior.floating,
           ),
@@ -939,8 +1115,12 @@ class _ProfileTabState extends State<_ProfileTab> {
 
   void _showEditProfileDialog(UserModel user) {
     final nameController = TextEditingController(text: user.name);
-    final weightController = TextEditingController(text: user.weightKg.toString());
-    final heightController = TextEditingController(text: user.heightCm.toString());
+    final weightController = TextEditingController(
+      text: user.weightKg.toString(),
+    );
+    final heightController = TextEditingController(
+      text: user.heightCm.toString(),
+    );
     FitnessGoal selectedGoal = user.goal;
 
     showDialog(
@@ -948,7 +1128,10 @@ class _ProfileTabState extends State<_ProfileTab> {
       builder: (context) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
           backgroundColor: const Color(0xFF1A1A1A),
-          title: Text('Edit Profil', style: GoogleFonts.barlow(fontWeight: FontWeight.bold)),
+          title: Text(
+            'Edit Profil',
+            style: GoogleFonts.barlow(fontWeight: FontWeight.bold),
+          ),
           content: SingleChildScrollView(
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -973,7 +1156,11 @@ class _ProfileTabState extends State<_ProfileTab> {
                 DropdownButtonFormField<FitnessGoal>(
                   value: selectedGoal,
                   dropdownColor: const Color(0xFF1A1A1A),
-                  items: FitnessGoal.values.map((g) => DropdownMenuItem(value: g, child: Text(g.name))).toList(),
+                  items: FitnessGoal.values
+                      .map(
+                        (g) => DropdownMenuItem(value: g, child: Text(g.name)),
+                      )
+                      .toList(),
                   onChanged: (v) => setDialogState(() => selectedGoal = v!),
                   decoration: const InputDecoration(labelText: 'Goal'),
                 ),
@@ -981,13 +1168,18 @@ class _ProfileTabState extends State<_ProfileTab> {
             ),
           ),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(context), child: const Text('Batal')),
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Batal'),
+            ),
             ElevatedButton(
               onPressed: () async {
                 final updatedUser = user.copyWith(
                   name: nameController.text,
-                  weightKg: double.tryParse(weightController.text) ?? user.weightKg,
-                  heightCm: double.tryParse(heightController.text) ?? user.heightCm,
+                  weightKg:
+                      double.tryParse(weightController.text) ?? user.weightKg,
+                  heightCm:
+                      double.tryParse(heightController.text) ?? user.heightCm,
                   goal: selectedGoal,
                 );
                 await FirestoreService.instance.saveUserProfile(updatedUser);
@@ -1014,15 +1206,18 @@ class _ProfileTabState extends State<_ProfileTab> {
               child: CircularProgressIndicator(color: Color(0xFFFF6B35)),
             );
           }
-          
-          // Jika terjadi error (seperti PERMISSION_DENIED saat logout), 
-          // tetap izinkan user untuk logout dengan menampilkan UI sederhana
+
           if (snap.hasError || !snap.hasData) {
             return _buildErrorOrEmptyProfile(uid, snap.hasError);
           }
 
           final user = snap.data;
-          return _buildProfileContent(user!);
+          if (user == null) {
+            return _buildErrorOrEmptyProfile(uid, false);
+          }
+
+          _syncReminderSettingsFromUser(user);
+          return _buildProfileContent(user);
         },
       ),
     );
@@ -1041,7 +1236,11 @@ class _ProfileTabState extends State<_ProfileTab> {
           const SizedBox(height: 16),
           Text(
             isError ? 'Sinkronisasi Selesai' : 'Profil Tidak Ditemukan',
-            style: GoogleFonts.barlow(fontSize: 18, color: Colors.white, fontWeight: FontWeight.bold),
+            style: GoogleFonts.barlow(
+              fontSize: 18,
+              color: Colors.white,
+              fontWeight: FontWeight.bold,
+            ),
           ),
           const SizedBox(height: 24),
           TextButton.icon(
@@ -1073,12 +1272,16 @@ class _ProfileTabState extends State<_ProfileTab> {
                 ),
               ),
               IconButton(
-                icon: const Icon(Icons.edit_outlined, color: Color(0xFFFF6B35)),
+                icon: const Icon(
+                  Icons.edit_outlined,
+                  color: Color(0xFFFF6B35),
+                ),
                 onPressed: () => _showEditProfileDialog(user),
               ),
             ],
           ),
           const SizedBox(height: 20),
+
           // ── User card ──
           Container(
             padding: const EdgeInsets.all(20),
@@ -1099,13 +1302,19 @@ class _ProfileTabState extends State<_ProfileTab> {
                       shape: BoxShape.circle,
                       image: user.photoBase64 != null
                           ? DecorationImage(
-                              image: MemoryImage(StorageService.base64ToBytes(user.photoBase64!)),
+                              image: MemoryImage(
+                                StorageService.base64ToBytes(user.photoBase64!),
+                              ),
                               fit: BoxFit.cover,
                             )
                           : null,
                     ),
                     child: user.photoBase64 == null
-                        ? const Icon(Icons.add_a_photo, color: Color(0xFFFF6B35), size: 24)
+                        ? const Icon(
+                            Icons.add_a_photo,
+                            color: Color(0xFFFF6B35),
+                            size: 24,
+                          )
                         : null,
                   ),
                 ),
@@ -1144,18 +1353,13 @@ class _ProfileTabState extends State<_ProfileTab> {
             ),
           ),
           const SizedBox(height: 16),
+
           // ── Stats ──
           Row(
             children: [
-              _ProfileStat(
-                'Berat',
-                '${user.weightKg.toStringAsFixed(0)} kg',
-              ),
+              _ProfileStat('Berat', '${user.weightKg.toStringAsFixed(0)} kg'),
               const SizedBox(width: 12),
-              _ProfileStat(
-                'Tinggi',
-                '${user.heightCm.toStringAsFixed(0)} cm',
-              ),
+              _ProfileStat('Tinggi', '${user.heightCm.toStringAsFixed(0)} cm'),
               const SizedBox(width: 12),
               _ProfileStat('BMI', user.bmi.toStringAsFixed(1)),
             ],
@@ -1171,6 +1375,7 @@ class _ProfileTabState extends State<_ProfileTab> {
             ),
           ),
           const SizedBox(height: 24),
+
           // ── Gym Reminder ──
           Container(
             padding: const EdgeInsets.all(16),
@@ -1207,68 +1412,10 @@ class _ProfileTabState extends State<_ProfileTab> {
                       ),
                     ),
                     Switch(
-                      value: _reminderEnabled,
+                      value: user.reminderEnabled,
                       activeColor: const Color(0xFFFF6B35),
                       onChanged: (v) async {
-                        if (!v) {
-                          _reminderTimer?.cancel();
-                          await NotificationService.instance.cancelGymReminder();
-                          if (!mounted) return;
-                          setState(() => _reminderEnabled = false);
-                          return;
-                        }
-
-                        final totalSeconds = _reminderDurationSeconds;
-                        if (totalSeconds <= 0) {
-                          if (!mounted) return;
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('Isi durasi reminder dulu, minimal 1 detik.'),
-                              backgroundColor: Colors.orange,
-                              behavior: SnackBarBehavior.floating,
-                            ),
-                          );
-                          return;
-                        }
-
-                        final granted =
-                            await NotificationService.instance.requestPermission();
-                        if (!granted) {
-                          if (!mounted) return;
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text(
-                                'Izin notifikasi belum aktif. Aktifkan dulu supaya reminder jalan.',
-                              ),
-                              backgroundColor: Colors.orange,
-                              behavior: SnackBarBehavior.floating,
-                            ),
-                          );
-                          return;
-                        }
-
-                        try {
-                          await NotificationService.instance.cancelGymReminder();
-                          await _scheduleReminderTimer();
-                          if (!mounted) return;
-                          setState(() => _reminderEnabled = true);
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(
-                              content: Text(
-                                'Reminder aktif, notifikasi akan muncul dalam $_reminderDurationLabel.',
-                              ),
-                              behavior: SnackBarBehavior.floating,
-                            ),
-                          );
-                        } catch (e) {
-                          if (!mounted) return;
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(
-                              content: Text('Gagal mengatur reminder: $e'),
-                              backgroundColor: Colors.red,
-                            ),
-                          );
-                        }
+                        await _saveReminderSettings(user, enabled: v);
                       },
                     ),
                   ],
@@ -1313,10 +1460,38 @@ class _ProfileTabState extends State<_ProfileTab> {
                     ),
                   ],
                 ),
+                const SizedBox(height: 12),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: _isSavingReminder
+                        ? null
+                        : () => _saveReminderSettings(
+                              user,
+                              enabled: user.reminderEnabled,
+                            ),
+                    icon: _isSavingReminder
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Color(0xFFFF6B35),
+                            ),
+                          )
+                        : const Icon(Icons.save_outlined),
+                    label: Text(
+                      user.reminderEnabled
+                          ? 'Simpan & Sinkronkan'
+                          : 'Simpan Interval Reminder',
+                    ),
+                  ),
+                ),
               ],
             ),
           ),
           const SizedBox(height: 24),
+
           // ── Notification Test ──
           Container(
             padding: const EdgeInsets.all(16),
@@ -1353,6 +1528,7 @@ class _ProfileTabState extends State<_ProfileTab> {
             ),
           ),
           const SizedBox(height: 24),
+
           // ── Logout ──
           SizedBox(
             width: double.infinity,
