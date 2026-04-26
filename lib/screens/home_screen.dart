@@ -572,6 +572,14 @@ class _WorkoutHistoryCard extends StatelessWidget {
                 ),
                 IconButton(
                   icon: const Icon(
+                    Icons.edit_outlined,
+                    color: Color(0xFF444444),
+                    size: 20,
+                  ),
+                  onPressed: () => _showEditNameDialog(context),
+                ),
+                IconButton(
+                  icon: const Icon(
                     Icons.delete_outline,
                     color: Color(0xFF444444),
                     size: 20,
@@ -661,6 +669,53 @@ class _WorkoutHistoryCard extends StatelessWidget {
                 ),
               ],
             ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showEditNameDialog(BuildContext context) {
+    final controller = TextEditingController(text: log.planName);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1A1A1A),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text(
+          'Edit Nama Plan',
+          style: GoogleFonts.barlow(
+            fontWeight: FontWeight.w700,
+            color: Colors.white,
+          ),
+        ),
+        content: TextField(
+          controller: controller,
+          style: const TextStyle(color: Colors.white),
+          decoration: InputDecoration(
+            hintText: 'Nama Plan Baru',
+            filled: true,
+            fillColor: const Color(0xFF0A0A0A),
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: const BorderSide(color: Color(0xFF2A2A2A)),
+            ),
+          ),
+          autofocus: true,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Batal'),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              final newName = controller.text.trim();
+              if (newName.isEmpty) return;
+              Navigator.pop(ctx);
+              await FirestoreService.instance.updateWorkoutLog(log.copyWith(planName: newName));
+            },
+            child: const Text('Simpan'),
           ),
         ],
       ),

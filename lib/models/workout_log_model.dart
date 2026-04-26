@@ -65,7 +65,10 @@ class ExerciseLog {
     'notes': notes,
   };
 
+  bool get isTimedExercise => _normalizeExerciseName(name) == 'plank';
+
   int get completedSets => sets.where((s) => s.isCompleted).length;
+
   double get totalVolume =>
       sets.where((s) => s.isCompleted).fold(0, (sum, s) => sum + s.volume);
 }
@@ -159,6 +162,7 @@ class WorkoutLog {
   };
 
   WorkoutLog copyWith({
+    String? planName,
     List<ExerciseLog>? exercises,
     DateTime? endTime,
     int? durationSeconds,
@@ -167,7 +171,7 @@ class WorkoutLog {
   }) => WorkoutLog(
     id: id,
     userId: userId,
-    planName: planName,
+    planName: planName ?? this.planName,
     exercises: exercises ?? this.exercises,
     startTime: startTime,
     endTime: endTime ?? this.endTime,
@@ -178,6 +182,10 @@ class WorkoutLog {
 }
 
 // ─── Exercise Templates ───────────────────────────────────────────────────────
+
+String _normalizeExerciseName(String value) {
+  return value.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
+}
 
 class ExerciseTemplate {
   final String name;

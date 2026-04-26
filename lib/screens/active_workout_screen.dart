@@ -40,11 +40,14 @@ class _ActiveWorkoutScreenState extends State<ActiveWorkoutScreen>
   late List<ExerciseLog> _exercises;
   Timer? _workoutTimer;
   Timer? _restTimer;
+  Timer? _plankTimer;
 
   DateTime? _workoutStartTime;
   int _elapsedSeconds = 0;
   int _restSecondsLeft = 0;
+  int _plankSecondsLeft = 0;
 
+  bool _isPlanking = false;
   bool _hasStartedSession = false;
   bool _isResting = false;
   bool _isSaving = false;
@@ -150,6 +153,7 @@ class _ActiveWorkoutScreenState extends State<ActiveWorkoutScreen>
     _tabController.dispose();
     _workoutTimer?.cancel();
     _restTimer?.cancel();
+    _plankTimer?.cancel();
     super.dispose();
   }
 
@@ -186,6 +190,34 @@ class _ActiveWorkoutScreenState extends State<ActiveWorkoutScreen>
       setState(() => _elapsedSeconds++);
     });
     _tabController.animateTo(1);
+  }
+
+  void _updateExercise(int index, {int? sets, int? reps}) {
+    setState(() {
+      final exercise = _exercises[index];
+      if (sets != null) {
+        final target = sets.clamp(1, 10);
+        if (target > exercise.sets.length) {
+          final diff = target - exercise.sets.length;
+          final lastReps = exercise.sets.isNotEmpty ? exercise.sets.last.reps : 10;
+          for (int i = 0; i < diff; i++) {
+            exercise.sets.add(ExerciseSet(
+              setNumber: exercise.sets.length + 1,
+              reps: lastReps,
+              weightKg: 0,
+            ));
+          }
+        } else if (target < exercise.sets.length) {
+          exercise.sets.removeRange(target, exercise.sets.length);
+        }
+      }
+      if (reps != null) {
+        final target = reps.clamp(1, 300);
+        for (var s in exercise.sets) {
+          s.reps = target;
+        }
+      }
+    });
   }
 
   void _addExercise() {
@@ -247,6 +279,28 @@ class _ActiveWorkoutScreenState extends State<ActiveWorkoutScreen>
     });
   }
 
+  void _startPlankTimer() {
+    final set = _currentSet;
+    if (set == null) return;
+
+    setState(() {
+      _isPlanking = true;
+      _plankSecondsLeft = set.reps;
+    });
+
+    _plankTimer?.cancel();
+    _plankTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) return;
+      if (_plankSecondsLeft <= 1) {
+        timer.cancel();
+        setState(() => _isPlanking = false);
+        _completeCurrentSet();
+      } else {
+        setState(() => _plankSecondsLeft--);
+      }
+    });
+  }
+
   Future<void> _skipRest() async {
     _restTimer?.cancel();
     await NotificationService.instance.cancelRestTimer();
@@ -260,6 +314,11 @@ class _ActiveWorkoutScreenState extends State<ActiveWorkoutScreen>
 
   Future<void> _completeCurrentSet() async {
     if (_isSaving) return;
+
+    _plankTimer?.cancel();
+    setState(() {
+      _isPlanking = false;
+    });
 
     final exerciseIndex = _currentExerciseIndex;
     final setIndex = _currentSetIndex;
@@ -408,11 +467,14 @@ class _ActiveWorkoutScreenState extends State<ActiveWorkoutScreen>
                 exercises: _exercises,
                 hasStartedSession: _hasStartedSession,
                 onAddExercise: _addExercise,
+                onUpdateExercise: _updateExercise,
                 onRemoveExercise: _removeExercise,
                 onStartWorkout: _startWorkoutSession,
               ),
               _WorkoutTab(
                 exercises: _exercises,
+                isPlanking: _isPlanking,
+                plankSecondsLeft: _plankSecondsLeft,
                 isWorkoutStarted: _hasStartedSession,
                 isResting: _isResting,
                 restSecondsLeft: _restSecondsLeft,
@@ -430,6 +492,7 @@ class _ActiveWorkoutScreenState extends State<ActiveWorkoutScreen>
                 onCompleteCurrentSet: _completeCurrentSet,
                 onSkipRest: _skipRest,
                 onFinishWorkout: _finishWorkout,
+                onStartPlank: _startPlankTimer,
               ),
             ],
           ),
@@ -445,6 +508,7 @@ class _SetupTab extends StatelessWidget {
   final List<ExerciseLog> exercises;
   final bool hasStartedSession;
   final VoidCallback onAddExercise;
+  final Function(int, {int? sets, int? reps}) onUpdateExercise;
   final ValueChanged<int> onRemoveExercise;
   final VoidCallback onStartWorkout;
 
@@ -452,6 +516,7 @@ class _SetupTab extends StatelessWidget {
     required this.exercises,
     required this.hasStartedSession,
     required this.onAddExercise,
+    required this.onUpdateExercise,
     required this.onRemoveExercise,
     required this.onStartWorkout,
   });
@@ -476,6 +541,10 @@ class _SetupTab extends StatelessWidget {
                     return _SetupExerciseCard(
                       exercise: exercise,
                       index: index,
+                      onUpdate: ({int? sets, int? reps}) {
+                        if (hasStartedSession) return;
+                        onUpdateExercise(index, sets: sets, reps: reps);
+                      },
                       canRemove: !hasStartedSession,
                       onRemove: () => onRemoveExercise(index),
                     );
@@ -539,6 +608,8 @@ class _SetupTab extends StatelessWidget {
 
 class _WorkoutTab extends StatelessWidget {
   final List<ExerciseLog> exercises;
+  final bool isPlanking;
+  final int plankSecondsLeft;
   final bool isWorkoutStarted;
   final bool isResting;
   final int restSecondsLeft;
@@ -556,11 +627,14 @@ class _WorkoutTab extends StatelessWidget {
   final Future<void> Function() onCompleteCurrentSet;
   final Future<void> Function() onSkipRest;
   final Future<void> Function() onFinishWorkout;
+  final VoidCallback onStartPlank;
 
   const _WorkoutTab({
     required this.exercises,
     required this.isWorkoutStarted,
     required this.isResting,
+    required this.isPlanking,
+    required this.plankSecondsLeft,
     required this.restSecondsLeft,
     required this.isSaving,
     required this.totalSetsCompleted,
@@ -576,6 +650,7 @@ class _WorkoutTab extends StatelessWidget {
     required this.onCompleteCurrentSet,
     required this.onSkipRest,
     required this.onFinishWorkout,
+    required this.onStartPlank,
   });
 
   @override
@@ -622,7 +697,10 @@ class _WorkoutTab extends StatelessWidget {
               set: currentSet!,
               isResting: isResting,
               isSaving: isSaving,
+              isPlanking: isPlanking,
+              plankSecondsLeft: plankSecondsLeft,
               onCompleteCurrentSet: onCompleteCurrentSet,
+              onStartPlank: onStartPlank,
             ),
           const SizedBox(height: 16),
           Text(
@@ -826,6 +904,9 @@ class _CurrentExerciseCard extends StatelessWidget {
   final ExerciseSet set;
   final bool isResting;
   final bool isSaving;
+  final bool isPlanking;
+  final int plankSecondsLeft;
+  final VoidCallback onStartPlank;
   final Future<void> Function() onCompleteCurrentSet;
 
   const _CurrentExerciseCard({
@@ -833,6 +914,9 @@ class _CurrentExerciseCard extends StatelessWidget {
     required this.set,
     required this.isResting,
     required this.isSaving,
+    required this.isPlanking,
+    required this.plankSecondsLeft,
+    required this.onStartPlank,
     required this.onCompleteCurrentSet,
   });
 
@@ -842,6 +926,11 @@ class _CurrentExerciseCard extends StatelessWidget {
     final currentSetNumber = set.setNumber;
     final isLastSet = currentSetNumber == totalSets;
     final buttonLabel = isLastSet ? 'SELESAI LATIHAN' : 'SELESAI SET';
+    final isTimed = exercise.isTimedExercise;
+
+    final displayButtonLabel = isPlanking
+        ? 'HOLD... ($plankSecondsLeft s)'
+        : (isTimed ? 'MULAI PLANK' : buttonLabel);
     
     final tutorial = ExerciseVideoCatalog.findByExerciseName(exercise.name);
 
@@ -896,7 +985,7 @@ class _CurrentExerciseCard extends StatelessWidget {
               Expanded(
                 child: _DetailBox(
                   label: 'REPS',
-                  value: '${set.reps}',
+                  value: '${set.reps}${isTimed ? "s" : ""}',
                 ),
               ),
               const SizedBox(width: 12),
@@ -912,7 +1001,11 @@ class _CurrentExerciseCard extends StatelessWidget {
           ),
           const SizedBox(height: 20),
           Text(
-            isResting ? 'Istirahat dulu sebelum set berikutnya' : 'Tekan tombol untuk menandai set selesai',
+            isResting
+                ? 'Istirahat dulu sebelum set berikutnya'
+                : (isPlanking
+                    ? 'Tahan posisi tubuhmu, jangan menyerah!'
+                    : 'Tekan tombol untuk memulai latihan'),
             style: GoogleFonts.spaceGrotesk(
               fontSize: 13,
               color: const Color(0xFF666666),
@@ -922,7 +1015,16 @@ class _CurrentExerciseCard extends StatelessWidget {
           SizedBox(
             width: double.infinity,
             child: ElevatedButton.icon(
-              onPressed: (isResting || isSaving) ? null : onCompleteCurrentSet,
+              onPressed: (isResting || isSaving || isPlanking)
+                  ? null
+                  : (isTimed ? onStartPlank : onCompleteCurrentSet),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: isPlanking ? const Color(0xFF1A1A1A) : const Color(0xFF00C896),
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+              ),
               icon: isSaving
                   ? const SizedBox(
                       width: 16,
@@ -932,15 +1034,10 @@ class _CurrentExerciseCard extends StatelessWidget {
                         color: Colors.white,
                       ),
                     )
-                  : Icon(isLastSet ? Icons.flag : Icons.check_circle_outline),
-              label: Text(buttonLabel),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF00C896),
-                padding: const EdgeInsets.symmetric(vertical: 16),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14),
-                ),
-              ),
+                  : Icon(isPlanking
+                      ? Icons.hourglass_bottom
+                      : (isLastSet ? Icons.flag : Icons.check_circle_outline)),
+              label: Text(displayButtonLabel),
             ),
           ),
         ],
@@ -1141,6 +1238,29 @@ class _ExerciseVideoPlayerState extends State<_ExerciseVideoPlayer> {
                       color: const Color(0xFFAAAAAA),
                     ),
                   ),
+                  if (widget.tutorial.instructions.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    ...widget.tutorial.instructions.map((step) => Padding(
+                          padding: const EdgeInsets.only(bottom: 4),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text("• ",
+                                  style: GoogleFonts.spaceGrotesk(
+                                      color: const Color(0xFFFF6B35),
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 12)),
+                              Expanded(
+                                child: Text(
+                                  step,
+                                  style: GoogleFonts.spaceGrotesk(
+                                      fontSize: 11, color: const Color(0xFFDDDDDD)),
+                                ),
+                              ),
+                            ],
+                          ),
+                        )),
+                  ],
                   const SizedBox(height: 10),
                   OutlinedButton.icon(
                     onPressed: _openTutorialExternally,
@@ -1499,12 +1619,14 @@ class _WorkoutSummaryCard extends StatelessWidget {
 class _SetupExerciseCard extends StatelessWidget {
   final ExerciseLog exercise;
   final int index;
+  final Function({int? sets, int? reps}) onUpdate;
   final bool canRemove;
   final VoidCallback onRemove;
 
   const _SetupExerciseCard({
     required this.exercise,
     required this.index,
+    required this.onUpdate,
     required this.canRemove,
     required this.onRemove,
   });
@@ -1513,6 +1635,7 @@ class _SetupExerciseCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final setCount = exercise.sets.length;
     final reps = setCount > 0 ? exercise.sets.first.reps : 0;
+    final isTimed = exercise.isTimedExercise;
 
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
@@ -1557,12 +1680,32 @@ class _SetupExerciseCard extends StatelessWidget {
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  '${exercise.category} · $setCount set × $reps reps',
+                  '${exercise.category} · $setCount set × $reps ${isTimed ? "detik" : "reps"}',
                   style: GoogleFonts.spaceGrotesk(
                     fontSize: 12,
                     color: const Color(0xFF666666),
                   ),
                 ),
+                if (canRemove) ...[
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      _buildCounter(
+                        label: 'Sets',
+                        value: setCount,
+                        onDecrement: () => onUpdate(sets: setCount - 1),
+                        onIncrement: () => onUpdate(sets: setCount + 1),
+                      ),
+                      const SizedBox(width: 16),
+                      _buildCounter(
+                        label: isTimed ? 'Detik' : 'Reps',
+                        value: reps,
+                        onDecrement: () => onUpdate(reps: reps - (isTimed ? 5 : 1)),
+                        onIncrement: () => onUpdate(reps: reps + (isTimed ? 5 : 1)),
+                      ),
+                    ],
+                  ),
+                ],
               ],
             ),
           ),
@@ -1572,6 +1715,63 @@ class _SetupExerciseCard extends StatelessWidget {
               onPressed: onRemove,
             ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildCounter({
+    required String label,
+    required int value,
+    required VoidCallback onDecrement,
+    required VoidCallback onIncrement,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label.toUpperCase(),
+          style: GoogleFonts.barlow(
+            fontSize: 10,
+            fontWeight: FontWeight.w700,
+            color: const Color(0xFF444444),
+          ),
+        ),
+        const SizedBox(height: 4),
+        Container(
+          decoration: BoxDecoration(
+            color: const Color(0xFF0A0A0A),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Row(
+            children: [
+              _counterBtn(Icons.remove, onDecrement),
+              SizedBox(
+                width: 30,
+                child: Text(
+                  '$value',
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.barlow(
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
+              _counterBtn(Icons.add, onIncrement),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _counterBtn(IconData icon, VoidCallback onTap) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: Padding(
+        padding: const EdgeInsets.all(6),
+        child: Icon(icon, size: 16, color: const Color(0xFFFF6B35)),
       ),
     );
   }
