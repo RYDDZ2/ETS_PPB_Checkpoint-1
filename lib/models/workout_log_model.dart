@@ -79,6 +79,7 @@ class WorkoutLog {
   final List<ExerciseLog> exercises;
   final DateTime startTime;
   final DateTime? endTime;
+  final int durationSeconds;
 
   /// base64-encoded JPEG strings (not URLs)
   final List<String> photoBase64List;
@@ -91,19 +92,33 @@ class WorkoutLog {
     required this.exercises,
     required this.startTime,
     this.endTime,
+    this.durationSeconds = 0,
     this.photoBase64List = const [],
     this.notes,
   });
 
-  Duration get duration =>
-      endTime == null ? Duration.zero : endTime!.difference(startTime);
+  Duration get duration {
+    if (durationSeconds > 0) {
+      return Duration(seconds: durationSeconds);
+    }
+
+    if (endTime == null) {
+      return Duration.zero;
+    }
+
+    return endTime!.difference(startTime);
+  }
 
   String get durationFormatted {
     final d = duration;
     final h = d.inHours;
     final m = d.inMinutes.remainder(60);
+    final s = d.inSeconds.remainder(60);
+
     if (h > 0) return '${h}h ${m}m';
-    return '${m}m';
+    if (m > 0) return '${m}m ${s}s';
+    if (s > 0) return '${s}s';
+    return '0s';
   }
 
   double get totalVolume => exercises.fold(0, (sum, e) => sum + e.totalVolume);
@@ -126,6 +141,7 @@ class WorkoutLog {
           [],
       startTime: (data['startTime'] as Timestamp?)?.toDate() ?? DateTime.now(),
       endTime: (data['endTime'] as Timestamp?)?.toDate(),
+      durationSeconds: (data['durationSeconds'] ?? 0) as int,
       photoBase64List: List<String>.from(data['photoBase64List'] ?? []),
       notes: data['notes'],
     );
@@ -137,6 +153,7 @@ class WorkoutLog {
     'exercises': exercises.map((e) => e.toMap()).toList(),
     'startTime': Timestamp.fromDate(startTime),
     'endTime': endTime != null ? Timestamp.fromDate(endTime!) : null,
+    'durationSeconds': durationSeconds,
     'photoBase64List': photoBase64List,
     'notes': notes,
   };
@@ -144,6 +161,7 @@ class WorkoutLog {
   WorkoutLog copyWith({
     List<ExerciseLog>? exercises,
     DateTime? endTime,
+    int? durationSeconds,
     List<String>? photoBase64List,
     String? notes,
   }) => WorkoutLog(
@@ -153,6 +171,7 @@ class WorkoutLog {
     exercises: exercises ?? this.exercises,
     startTime: startTime,
     endTime: endTime ?? this.endTime,
+    durationSeconds: durationSeconds ?? this.durationSeconds,
     photoBase64List: photoBase64List ?? this.photoBase64List,
     notes: notes ?? this.notes,
   );

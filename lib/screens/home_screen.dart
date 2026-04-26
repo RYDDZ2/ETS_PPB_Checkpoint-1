@@ -169,7 +169,7 @@ class _DashboardTab extends StatelessWidget {
                       return Row(
                         children: [
                           _StatCard(
-                            label: 'Hari ini Minggu',
+                            label: 'Hari',
                             value: '${snap.data ?? 0}/7',
                             icon: Icons.calendar_today_outlined,
                             color: const Color(0xFF00C896),
@@ -592,11 +592,6 @@ class _WorkoutHistoryCard extends StatelessWidget {
                   Icons.check_circle_outline,
                   '${log.totalSetsCompleted} sets',
                 ),
-                const SizedBox(width: 8),
-                _Chip(
-                  Icons.bar_chart,
-                  '${log.totalVolume.toStringAsFixed(0)} kg vol',
-                ),
               ],
             ),
           ),
@@ -756,9 +751,9 @@ class _ProfileTab extends StatefulWidget {
 }
 
 class _ProfileTabState extends State<_ProfileTab> {
-  final _reminderHoursCtrl = TextEditingController(text: '0');
-  final _reminderMinutesCtrl = TextEditingController(text: '30');
-  final _reminderSecondsCtrl = TextEditingController(text: '0');
+  final _reminderHoursCtrl = TextEditingController(text: '23');
+  final _reminderMinutesCtrl = TextEditingController(text: '59');
+  final _reminderSecondsCtrl = TextEditingController(text: '59');
   bool _reminderEnabled = false;
   Timer? _reminderTimer;
 

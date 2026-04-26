@@ -294,6 +294,7 @@ class _ActiveWorkoutScreenState extends State<ActiveWorkoutScreen>
 
     final startTime = _workoutStartTime ?? DateTime.now();
     final endTime = DateTime.now();
+    final durationSeconds = max(1, endTime.difference(startTime).inSeconds);
 
     final log = WorkoutLog(
       id: '',
@@ -302,6 +303,7 @@ class _ActiveWorkoutScreenState extends State<ActiveWorkoutScreen>
       exercises: _exercises,
       startTime: startTime,
       endTime: endTime,
+      durationSeconds: durationSeconds,
     );
 
     try {
@@ -319,6 +321,7 @@ class _ActiveWorkoutScreenState extends State<ActiveWorkoutScreen>
               exercises: _exercises,
               startTime: startTime,
               endTime: endTime,
+              durationSeconds: durationSeconds,
             ),
             userId: widget.userId,
             isPostWorkout: true,
