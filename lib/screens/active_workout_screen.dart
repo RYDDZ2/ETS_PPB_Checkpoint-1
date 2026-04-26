@@ -1,14 +1,18 @@
 import 'dart:async';
 import 'dart:math';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:uuid/uuid.dart';
+import 'package:youtube_player_flutter/youtube_player_flutter.dart';
 
 import '../models/workout_log_model.dart';
 import '../services/firestore_service.dart';
 import '../services/notification_service.dart';
+import '../models/exercise_video_model.dart';
 import 'progress_cam_screen.dart';
 
 class ActiveWorkoutScreen extends StatefulWidget {
@@ -44,6 +48,7 @@ class _ActiveWorkoutScreenState extends State<ActiveWorkoutScreen>
   bool _hasStartedSession = false;
   bool _isResting = false;
   bool _isSaving = false;
+  bool _isCountingDown = false;
 
   @override
   void initState() {
@@ -161,16 +166,25 @@ class _ActiveWorkoutScreenState extends State<ActiveWorkoutScreen>
     }
 
     if (!_hasStartedSession) {
-      _workoutStartTime = DateTime.now();
-      _elapsedSeconds = 0;
-      _workoutTimer?.cancel();
-      _workoutTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-        if (!mounted) return;
-        setState(() => _elapsedSeconds++);
-      });
-      setState(() => _hasStartedSession = true);
+      setState(() => _isCountingDown = true);
+      return;
     }
 
+    _tabController.animateTo(1);
+  }
+
+  void _onCountdownFinished() {
+    setState(() {
+      _isCountingDown = false;
+      _hasStartedSession = true;
+      _workoutStartTime = DateTime.now();
+      _elapsedSeconds = 0;
+    });
+    _workoutTimer?.cancel();
+    _workoutTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      setState(() => _elapsedSeconds++);
+    });
     _tabController.animateTo(1);
   }
 
@@ -385,36 +399,42 @@ class _ActiveWorkoutScreenState extends State<ActiveWorkoutScreen>
           if (_hasStartedSession || _elapsedSeconds > 0) _buildTimerChip(),
         ],
       ),
-      body: TabBarView(
-        controller: _tabController,
+      body: Stack(
         children: [
-          _SetupTab(
-            exercises: _exercises,
-            hasStartedSession: _hasStartedSession,
-            onAddExercise: _addExercise,
-            onRemoveExercise: _removeExercise,
-            onStartWorkout: _startWorkoutSession,
+          TabBarView(
+            controller: _tabController,
+            children: [
+              _SetupTab(
+                exercises: _exercises,
+                hasStartedSession: _hasStartedSession,
+                onAddExercise: _addExercise,
+                onRemoveExercise: _removeExercise,
+                onStartWorkout: _startWorkoutSession,
+              ),
+              _WorkoutTab(
+                exercises: _exercises,
+                isWorkoutStarted: _hasStartedSession,
+                isResting: _isResting,
+                restSecondsLeft: _restSecondsLeft,
+                isSaving: _isSaving,
+                totalSetsCompleted: _totalSetsCompleted,
+                totalSets: _totalSets,
+                totalExercises: _totalExercises,
+                completedExercises: _completedExercises,
+                elapsedFormatted: _elapsedFormatted,
+                currentExercise: _currentExercise,
+                currentSet: _currentSet,
+                isWorkoutComplete: _isWorkoutComplete,
+                onStartWorkout: _startWorkoutSession,
+                onGoToPlanTab: () => _tabController.animateTo(0),
+                onCompleteCurrentSet: _completeCurrentSet,
+                onSkipRest: _skipRest,
+                onFinishWorkout: _finishWorkout,
+              ),
+            ],
           ),
-          _WorkoutTab(
-            exercises: _exercises,
-            isWorkoutStarted: _hasStartedSession,
-            isResting: _isResting,
-            restSecondsLeft: _restSecondsLeft,
-            isSaving: _isSaving,
-            totalSetsCompleted: _totalSetsCompleted,
-            totalSets: _totalSets,
-            totalExercises: _totalExercises,
-            completedExercises: _completedExercises,
-            elapsedFormatted: _elapsedFormatted,
-            currentExercise: _currentExercise,
-            currentSet: _currentSet,
-            isWorkoutComplete: _isWorkoutComplete,
-            onStartWorkout: _startWorkoutSession,
-            onGoToPlanTab: () => _tabController.animateTo(0),
-            onCompleteCurrentSet: _completeCurrentSet,
-            onSkipRest: _skipRest,
-            onFinishWorkout: _finishWorkout,
-          ),
+          if (_isCountingDown)
+            _CountdownOverlay(onFinished: _onCountdownFinished),
         ],
       ),
     );
@@ -822,6 +842,8 @@ class _CurrentExerciseCard extends StatelessWidget {
     final currentSetNumber = set.setNumber;
     final isLastSet = currentSetNumber == totalSets;
     final buttonLabel = isLastSet ? 'SELESAI LATIHAN' : 'SELESAI SET';
+    
+    final tutorial = ExerciseVideoCatalog.findByExerciseName(exercise.name);
 
     return Container(
       padding: const EdgeInsets.all(18),
@@ -858,6 +880,9 @@ class _CurrentExerciseCard extends StatelessWidget {
               color: const Color(0xFFFF6B35),
             ),
           ),
+          const SizedBox(height: 12),
+          if (tutorial != null)
+            _ExerciseVideoPlayer(tutorial: tutorial),
           const SizedBox(height: 20),
           Row(
             children: [
@@ -924,6 +949,220 @@ class _CurrentExerciseCard extends StatelessWidget {
   }
 }
 
+class _ExerciseVideoPlayer extends StatefulWidget {
+  final ExerciseVideoTutorial tutorial;
+
+  const _ExerciseVideoPlayer({required this.tutorial});
+
+  @override
+  State<_ExerciseVideoPlayer> createState() => _ExerciseVideoPlayerState();
+}
+
+class _ExerciseVideoPlayerState extends State<_ExerciseVideoPlayer> {
+  late final YoutubePlayerController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = YoutubePlayerController(
+      initialVideoId: widget.tutorial.youtubeId,
+      flags: const YoutubePlayerFlags(
+        autoPlay: false,
+        mute: false,
+        controlsVisibleAtStart: true,
+        enableCaption: true,
+      ),
+    );
+  }
+
+  @override
+  void didUpdateWidget(covariant _ExerciseVideoPlayer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.tutorial.youtubeId != widget.tutorial.youtubeId) {
+      _controller.load(widget.tutorial.youtubeId);
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _openTutorialExternally() async {
+    final uri = Uri.parse(
+      'https://www.youtube.com/watch?v=${widget.tutorial.youtubeId}',
+    );
+
+    await launchUrl(uri, mode: LaunchMode.externalApplication);
+  }
+
+  Widget _buildWebFallback() {
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFF333333)),
+        color: Colors.black,
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: AspectRatio(
+          aspectRatio: 16 / 9,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              Image.network(
+                'https://img.youtube.com/vi/${widget.tutorial.youtubeId}/hqdefault.jpg',
+                fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) => Container(
+                  color: Colors.black,
+                  alignment: Alignment.center,
+                  child: const Icon(
+                    Icons.play_circle_fill,
+                    color: Color(0xFFFF6B35),
+                    size: 72,
+                  ),
+                ),
+              ),
+              Container(color: Colors.black.withOpacity(0.35)),
+              Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        width: 68,
+                        height: 68,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFF6B35),
+                          shape: BoxShape.circle,
+                          boxShadow: [
+                            BoxShadow(
+                              color: const Color(0xFFFF6B35).withOpacity(0.35),
+                              blurRadius: 16,
+                              spreadRadius: 2,
+                            ),
+                          ],
+                        ),
+                        child: IconButton(
+                          icon: const Icon(
+                            Icons.play_arrow,
+                            color: Colors.white,
+                            size: 36,
+                          ),
+                          onPressed: _openTutorialExternally,
+                          tooltip: 'Buka tutorial YouTube',
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        widget.tutorial.title,
+                        textAlign: TextAlign.center,
+                        style: GoogleFonts.barlow(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w800,
+                          color: Colors.white,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        'Ketuk untuk membuka video tutorial',
+                        textAlign: TextAlign.center,
+                        style: GoogleFonts.spaceGrotesk(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.white,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      OutlinedButton.icon(
+                        onPressed: _openTutorialExternally,
+                        icon: const Icon(Icons.open_in_new),
+                        label: const Text('Buka Tutorial'),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: Colors.white,
+                          side: const BorderSide(color: Color(0xFFFF6B35)),
+                          backgroundColor:
+                              const Color(0xFFFF6B35).withOpacity(0.12),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (kIsWeb) {
+      return _buildWebFallback();
+    }
+
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFF333333)),
+        color: Colors.black,
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            YoutubePlayer(
+              controller: _controller,
+              showVideoProgressIndicator: true,
+              progressIndicatorColor: const Color(0xFFFF6B35),
+            ),
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    widget.tutorial.title,
+                    style: GoogleFonts.barlow(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w800,
+                      color: Colors.white,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    widget.tutorial.description,
+                    style: GoogleFonts.spaceGrotesk(
+                      fontSize: 12,
+                      color: const Color(0xFFAAAAAA),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  OutlinedButton.icon(
+                    onPressed: _openTutorialExternally,
+                    icon: const Icon(Icons.open_in_new),
+                    label: const Text('Buka di YouTube'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.white,
+                      side: const BorderSide(color: Color(0xFFFF6B35)),
+                      backgroundColor:
+                          const Color(0xFFFF6B35).withOpacity(0.12),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _DetailBox extends StatelessWidget {
   final String label;
   final String value;
@@ -961,6 +1200,86 @@ class _DetailBox extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _CountdownOverlay extends StatefulWidget {
+  final VoidCallback onFinished;
+
+  const _CountdownOverlay({required this.onFinished});
+
+  @override
+  State<_CountdownOverlay> createState() => _CountdownOverlayState();
+}
+
+class _CountdownOverlayState extends State<_CountdownOverlay> with SingleTickerProviderStateMixin {
+  int _count = 3;
+  late AnimationController _controller;
+  late Animation<double> _scaleAnimation;
+  late Animation<double> _opacityAnimation;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(vsync: this, duration: const Duration(milliseconds: 900));
+
+    _scaleAnimation = TweenSequence<double>([
+      TweenSequenceItem(
+        tween: Tween<double>(begin: 0.0, end: 1.2).chain(CurveTween(curve: Curves.easeOutQuart)),
+        weight: 40,
+      ),
+      TweenSequenceItem(
+        tween: Tween<double>(begin: 1.2, end: 1.0).chain(CurveTween(curve: Curves.easeInQuad)),
+        weight: 60,
+      ),
+    ]).animate(_controller);
+
+    _opacityAnimation = TweenSequence<double>([
+      TweenSequenceItem(tween: Tween<double>(begin: 0.0, end: 1.0), weight: 20),
+      TweenSequenceItem(tween: Tween<double>(begin: 1.0, end: 1.0), weight: 60),
+      TweenSequenceItem(tween: Tween<double>(begin: 1.0, end: 0.0), weight: 20),
+    ]).animate(_controller);
+
+    _runCountdown();
+  }
+
+  Future<void> _runCountdown() async {
+    for (int i = 3; i >= 0; i--) {
+      if (!mounted) return;
+      setState(() => _count = i);
+      HapticFeedback.mediumImpact();
+      await _controller.forward(from: 0.0);
+    }
+    widget.onFinished();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final text = _count == 0 ? 'GO!' : '$_count';
+    return Container(
+      color: Colors.black.withOpacity(0.85),
+      child: Center(
+        child: AnimatedBuilder(
+          animation: _controller,
+          builder: (context, child) => Opacity(
+            opacity: _opacityAnimation.value,
+            child: Transform.scale(
+              scale: _scaleAnimation.value,
+              child: Text(
+                text,
+                style: GoogleFonts.barlow(fontSize: 140, fontWeight: FontWeight.w900, color: const Color(0xFFFF6B35), fontStyle: FontStyle.italic),
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }
