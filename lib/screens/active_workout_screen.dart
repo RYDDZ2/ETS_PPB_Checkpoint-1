@@ -12,6 +12,7 @@ import 'package:youtube_player_iframe/youtube_player_iframe.dart';
 import '../models/workout_log_model.dart';
 import '../services/firestore_service.dart';
 import '../services/notification_service.dart';
+import '../services/workout_audio_service.dart';
 import '../models/exercise_video_model.dart';
 import 'progress_cam_screen.dart';
 
@@ -35,6 +36,7 @@ class _ActiveWorkoutScreenState extends State<ActiveWorkoutScreen>
   static const int _restMaxSeconds = 90;
 
   late final TabController _tabController;
+  late final ScrollController _workoutScrollController;
   final Random _random = Random();
 
   late List<ExerciseLog> _exercises;
@@ -52,6 +54,7 @@ class _ActiveWorkoutScreenState extends State<ActiveWorkoutScreen>
   bool _isResting = false;
   bool _isSaving = false;
   bool _isCountingDown = false;
+  final GlobalKey _currentActionButtonKey = GlobalKey();
 
   // ✅ Simpan nama exercise saat rest dimulai untuk dipakai di notifikasi
   String? _restingForExercise;
@@ -60,6 +63,7 @@ class _ActiveWorkoutScreenState extends State<ActiveWorkoutScreen>
   void initState() {
     super.initState();
     _tabController = TabController(length: 2, vsync: this);
+    _workoutScrollController = ScrollController();
     _exercises = _buildExercises();
   }
 
@@ -95,6 +99,31 @@ class _ActiveWorkoutScreenState extends State<ActiveWorkoutScreen>
         ),
       );
     }).toList();
+  }
+
+  void _scrollWorkoutToTop() {
+    if (!_workoutScrollController.hasClients) return;
+    _workoutScrollController.animateTo(
+      0,
+      duration: const Duration(milliseconds: 350),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
+  void _scrollToCurrentExerciseCard() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_workoutScrollController.hasClients) return;
+
+      final context = _currentActionButtonKey.currentContext;
+      if (context == null) return;
+
+      Scrollable.ensureVisible(
+        context,
+        duration: const Duration(milliseconds: 450),
+        curve: Curves.easeOutCubic,
+        alignment: 1.0,
+      );
+    });
   }
 
   int? get _currentExerciseIndex {
@@ -155,9 +184,11 @@ class _ActiveWorkoutScreenState extends State<ActiveWorkoutScreen>
   @override
   void dispose() {
     _tabController.dispose();
+    _workoutScrollController.dispose();
     _workoutTimer?.cancel();
     _restTimer?.cancel();
     _plankTimer?.cancel();
+    unawaited(WorkoutAudioService.instance.stopWorkoutMusic());
     // Cancel scheduled notification saat screen ditutup
     NotificationService.instance.cancelRestTimer();
     super.dispose();
@@ -176,6 +207,7 @@ class _ActiveWorkoutScreenState extends State<ActiveWorkoutScreen>
     }
 
     if (!_hasStartedSession) {
+      unawaited(WorkoutAudioService.instance.playCountdownSfx());
       setState(() => _isCountingDown = true);
       return;
     }
@@ -195,6 +227,7 @@ class _ActiveWorkoutScreenState extends State<ActiveWorkoutScreen>
       if (!mounted) return;
       setState(() => _elapsedSeconds++);
     });
+    unawaited(WorkoutAudioService.instance.startWorkoutMusic());
     _tabController.animateTo(1);
   }
 
@@ -269,6 +302,10 @@ class _ActiveWorkoutScreenState extends State<ActiveWorkoutScreen>
       _restSecondsLeft = seconds;
       _restingForExercise = exerciseName;
     });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _scrollWorkoutToTop();
+    });
 
     // ✅ Schedule backup notification (untuk saat app di background)
     try {
@@ -310,6 +347,7 @@ class _ActiveWorkoutScreenState extends State<ActiveWorkoutScreen>
           _restSecondsLeft = 0;
           _restingForExercise = null;
         });
+        _scrollToCurrentExerciseCard();
       } else {
         setState(() => _restSecondsLeft--);
       }
@@ -361,6 +399,7 @@ class _ActiveWorkoutScreenState extends State<ActiveWorkoutScreen>
       _restSecondsLeft = 0;
       _restingForExercise = null;
     });
+    _scrollToCurrentExerciseCard();
   }
 
   Future<void> _completeCurrentSet() async {
@@ -421,6 +460,8 @@ class _ActiveWorkoutScreenState extends State<ActiveWorkoutScreen>
     _workoutTimer?.cancel();
     _restTimer?.cancel();
     await NotificationService.instance.cancelRestTimer();
+    unawaited(WorkoutAudioService.instance.playWorkoutCompleteSfx());
+    unawaited(WorkoutAudioService.instance.stopWorkoutMusic());
 
     final startTime = _workoutStartTime ?? DateTime.now();
     final endTime = DateTime.now();
@@ -530,6 +571,7 @@ class _ActiveWorkoutScreenState extends State<ActiveWorkoutScreen>
               ),
               _WorkoutTab(
                 exercises: _exercises,
+                scrollController: _workoutScrollController,
                 isPlanking: _isPlanking,
                 plankSecondsLeft: _plankSecondsLeft,
                 isWorkoutStarted: _hasStartedSession,
@@ -544,6 +586,7 @@ class _ActiveWorkoutScreenState extends State<ActiveWorkoutScreen>
                 currentExercise: _currentExercise,
                 currentSet: _currentSet,
                 isWorkoutComplete: _isWorkoutComplete,
+                currentActionButtonKey: _currentActionButtonKey,
                 onStartWorkout: _startWorkoutSession,
                 onGoToPlanTab: () => _tabController.animateTo(0),
                 onCompleteCurrentSet: _completeCurrentSet,
@@ -669,6 +712,7 @@ class _SetupTab extends StatelessWidget {
 
 class _WorkoutTab extends StatelessWidget {
   final List<ExerciseLog> exercises;
+  final ScrollController scrollController;
   final bool isPlanking;
   final int plankSecondsLeft;
   final bool isWorkoutStarted;
@@ -683,6 +727,7 @@ class _WorkoutTab extends StatelessWidget {
   final ExerciseLog? currentExercise;
   final ExerciseSet? currentSet;
   final bool isWorkoutComplete;
+  final GlobalKey currentActionButtonKey;
   final VoidCallback onStartWorkout;
   final VoidCallback onGoToPlanTab;
   final Future<void> Function() onCompleteCurrentSet;
@@ -692,6 +737,7 @@ class _WorkoutTab extends StatelessWidget {
 
   const _WorkoutTab({
     required this.exercises,
+    required this.scrollController,
     required this.isWorkoutStarted,
     required this.isResting,
     required this.isPlanking,
@@ -706,6 +752,7 @@ class _WorkoutTab extends StatelessWidget {
     required this.currentExercise,
     required this.currentSet,
     required this.isWorkoutComplete,
+    required this.currentActionButtonKey,
     required this.onStartWorkout,
     required this.onGoToPlanTab,
     required this.onCompleteCurrentSet,
@@ -731,6 +778,7 @@ class _WorkoutTab extends StatelessWidget {
 
     return SafeArea(
       child: ListView(
+        controller: scrollController,
         padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
         children: [
           _WorkoutProgressCard(
@@ -753,16 +801,17 @@ class _WorkoutTab extends StatelessWidget {
               onFinishWorkout: onFinishWorkout,
             )
           else if (currentExercise != null && currentSet != null)
-            _CurrentExerciseCard(
-              exercise: currentExercise!,
-              set: currentSet!,
-              isResting: isResting,
-              isSaving: isSaving,
-              isPlanking: isPlanking,
-              plankSecondsLeft: plankSecondsLeft,
-              onCompleteCurrentSet: onCompleteCurrentSet,
-              onStartPlank: onStartPlank,
-            ),
+              _CurrentExerciseCard(
+                exercise: currentExercise!,
+                set: currentSet!,
+                isResting: isResting,
+                isSaving: isSaving,
+                isPlanking: isPlanking,
+                plankSecondsLeft: plankSecondsLeft,
+                actionButtonKey: currentActionButtonKey,
+                onCompleteCurrentSet: onCompleteCurrentSet,
+                onStartPlank: onStartPlank,
+              ),
           const SizedBox(height: 16),
           Text(
             'Rangkuman latihan',
@@ -967,16 +1016,19 @@ class _CurrentExerciseCard extends StatelessWidget {
   final bool isSaving;
   final bool isPlanking;
   final int plankSecondsLeft;
+  final Key? actionButtonKey;
   final VoidCallback onStartPlank;
   final Future<void> Function() onCompleteCurrentSet;
 
   const _CurrentExerciseCard({
+    super.key,
     required this.exercise,
     required this.set,
     required this.isResting,
     required this.isSaving,
     required this.isPlanking,
     required this.plankSecondsLeft,
+    required this.actionButtonKey,
     required this.onStartPlank,
     required this.onCompleteCurrentSet,
   });
@@ -1075,6 +1127,7 @@ class _CurrentExerciseCard extends StatelessWidget {
           SizedBox(
             width: double.infinity,
             child: ElevatedButton.icon(
+              key: actionButtonKey,
               onPressed: (isResting || isSaving || isPlanking)
                   ? null
                   : (isTimed ? onStartPlank : onCompleteCurrentSet),
@@ -1139,18 +1192,10 @@ class _ExerciseVideoPlayerState extends State<_ExerciseVideoPlayer> {
   }
 
   void _openInAppPlayer() {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.black,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (_) => _YoutubePlayerModal(
-        youtubeId: widget.tutorial.youtubeId,
-        title: widget.tutorial.title,
-      ),
-    );
+    // YouTube embed bisa ditolak oleh beberapa video (error 152-4).
+    // Untuk menjaga pengalaman user tetap lancar, buka tutorial langsung
+    // di aplikasi/browser YouTube yang lebih kompatibel.
+    unawaited(_openTutorialExternally());
   }
 
   @override
