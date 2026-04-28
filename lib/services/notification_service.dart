@@ -19,14 +19,19 @@ class NotificationService {
 
   // Notification IDs
   static const int restTimerId = 1;
-  static const int gymReminderId = 2; // kept for legacy cancel
+  static const int gymReminderId = 2;
   static const int motivationId = 3;
 
   // Multiple one-shot alarm slots untuk gym reminder
   static const int _gymReminderBaseId = 200;
   static const int _gymReminderSlots = 10;
 
+  // Track apakah sudah diinisialisasi
+  bool _initialized = false;
+
   Future<void> initialize() async {
+    if (_initialized) return;
+
     tz.initializeTimeZones();
     await _configureLocalTimezone();
 
@@ -40,24 +45,37 @@ class NotificationService {
     await _plugin.initialize(
       const InitializationSettings(android: androidInit, iOS: iosInit),
       onDidReceiveNotificationResponse: _onNotificationTap,
+      // ✅ FIX: Handle notifikasi yang muncul saat app di foreground (Android 14+)
+      onDidReceiveBackgroundNotificationResponse: _onBackgroundNotificationTap,
     );
 
     await _createChannels();
+    _initialized = true;
   }
 
   Future<void> _configureLocalTimezone() async {
-    final timeZoneInfo = await FlutterTimezone.getLocalTimezone();
-    tz.setLocalLocation(tz.getLocation(timeZoneInfo.identifier));
+    try {
+      final timeZoneInfo = await FlutterTimezone.getLocalTimezone();
+      tz.setLocalLocation(tz.getLocation(timeZoneInfo.identifier));
+    } catch (e) {
+      // Fallback ke UTC jika gagal
+      debugPrint('Timezone config failed, falling back to UTC: $e');
+      tz.setLocalLocation(tz.UTC);
+    }
   }
 
   Future<void> _createChannels() async {
+    // ✅ FIX: enableLights, showBadge, dan sound wajib di-set
+    //         untuk memastikan notifikasi muncul di foreground & lockscreen
     const restChannel = AndroidNotificationChannel(
       _restTimerChannelId,
       'Rest Timer',
       description: 'Notifikasi saat rest timer selesai',
-      importance: Importance.high,
+      importance: Importance.max, // ✅ max agar heads-up notification muncul
       playSound: true,
       enableVibration: true,
+      enableLights: true,
+      showBadge: true,
     );
 
     const reminderChannel = AndroidNotificationChannel(
@@ -67,6 +85,8 @@ class NotificationService {
       importance: Importance.high,
       playSound: true,
       enableVibration: true,
+      enableLights: true,
+      showBadge: true,
     );
 
     const motivationChannel = AndroidNotificationChannel(
@@ -85,7 +105,9 @@ class NotificationService {
   }
 
   void _onNotificationTap(NotificationResponse response) {
-    // Handle notification tap - could navigate to specific screen
+    // Handle notification tap - navigasi ke screen terkait jika perlu
+    debugPrint(
+        'Notification tapped: ${response.id} payload: ${response.payload}');
   }
 
   // ─────────────────────────── REQUEST PERMISSION ──────────────────────────
@@ -103,11 +125,15 @@ class NotificationService {
         AndroidFlutterLocalNotificationsPlugin>();
 
     if (android != null) {
-      final exactGranted = await android.requestExactAlarmsPermission();
-      if (exactGranted == false) {
-        debugPrint(
-          'Exact alarm permission not granted; falling back to inexact scheduling.',
-        );
+      try {
+        final exactGranted = await android.requestExactAlarmsPermission();
+        if (exactGranted == false) {
+          debugPrint(
+            'Exact alarm permission not granted; falling back to inexact scheduling.',
+          );
+        }
+      } catch (e) {
+        debugPrint('requestExactAlarmsPermission error: $e');
       }
     }
 
@@ -116,31 +142,51 @@ class NotificationService {
 
   // ─────────────────────────── REST TIMER ──────────────────────────────────
 
-  /// Show notification when rest timer ends
+  /// ✅ FIX: Detail notifikasi rest timer dengan Importance.max
+  ///         agar muncul sebagai heads-up notification saat app di foreground
+  NotificationDetails get _restTimerDetails => const NotificationDetails(
+        android: AndroidNotificationDetails(
+          _restTimerChannelId,
+          'Rest Timer',
+          channelDescription: 'Rest timer notification',
+          importance: Importance.max, // ✅ heads-up
+          priority: Priority.max, // ✅ heads-up
+          icon: '@mipmap/ic_launcher',
+          color: Color.fromARGB(255, 255, 107, 53),
+          // ✅ FIX: fullScreenIntent memastikan notifikasi muncul
+          //         bahkan saat layar mati atau app di foreground
+          fullScreenIntent: true,
+          // ✅ FIX: visibility PUBLIC agar muncul di lockscreen
+          visibility: NotificationVisibility.public,
+          playSound: true,
+          enableVibration: true,
+          // ✅ FIX: ticker untuk aksesibilitas
+          ticker: 'Rest timer selesai',
+          // ✅ FIX: autoCancel = true agar hilang saat di-tap
+          autoCancel: true,
+        ),
+        iOS: DarwinNotificationDetails(
+          sound: 'default',
+          presentAlert: true,
+          presentBadge: true,
+          presentSound: true,
+          interruptionLevel: InterruptionLevel.timeSensitive,
+        ),
+      );
+
+  /// ✅ Tampilkan notifikasi REST SELESAI langsung (immediate show)
+  /// Digunakan sebagai primary trigger saat in-app timer habis
   Future<void> showRestCompleteNotification({String? exerciseName}) async {
+    // Pastikan izin sudah ada
+    await requestPermission();
+
     await _plugin.show(
       restTimerId,
       '💪 Rest selesai!',
       exerciseName != null
           ? 'Waktunya lanjut $exerciseName bro!'
           : 'Waktunya lanjut set berikutnya bro!',
-      NotificationDetails(
-        android: AndroidNotificationDetails(
-          _restTimerChannelId,
-          'Rest Timer',
-          channelDescription: 'Rest timer notification',
-          importance: Importance.high,
-          priority: Priority.high,
-          icon: '@mipmap/ic_launcher',
-          color: const Color.fromARGB(255, 255, 107, 53),
-        ),
-        iOS: const DarwinNotificationDetails(
-          sound: 'default',
-          presentAlert: true,
-          presentBadge: false,
-          presentSound: true,
-        ),
-      ),
+      _restTimerDetails,
     );
   }
 
@@ -170,16 +216,19 @@ class NotificationService {
       await schedule(AndroidScheduleMode.exactAllowWhileIdle);
     } on PlatformException catch (e) {
       if (e.code != 'exact_alarms_not_permitted') rethrow;
+      debugPrint('Exact alarm not permitted, using inexact: ${e.message}');
       await schedule(AndroidScheduleMode.inexactAllowWhileIdle);
     }
   }
 
-  /// Schedule rest timer notification
+  /// ✅ Schedule rest timer notification (backup saat app di background)
   Future<void> scheduleRestTimer({
     required int seconds,
     String? exerciseName,
   }) async {
     await _plugin.cancel(restTimerId);
+
+    if (seconds <= 0) return;
 
     final scheduledTime = tz.TZDateTime.now(tz.local).add(
       Duration(seconds: seconds),
@@ -192,22 +241,10 @@ class NotificationService {
           ? 'Waktunya lanjut $exerciseName!'
           : 'Waktunya lanjut set berikutnya!',
       scheduledTime: scheduledTime,
-      details: NotificationDetails(
-        android: AndroidNotificationDetails(
-          _restTimerChannelId,
-          'Rest Timer',
-          channelDescription: 'Rest timer notification',
-          importance: Importance.high,
-          priority: Priority.high,
-          icon: '@mipmap/ic_launcher',
-        ),
-        iOS: const DarwinNotificationDetails(
-          sound: 'default',
-          presentAlert: true,
-          presentSound: true,
-        ),
-      ),
+      details: _restTimerDetails,
     );
+
+    debugPrint('Rest timer scheduled for $seconds seconds from now');
   }
 
   /// Cancel rest timer notification
@@ -231,6 +268,10 @@ class NotificationService {
           importance: Importance.high,
           priority: Priority.high,
           icon: '@mipmap/ic_launcher',
+          visibility: NotificationVisibility.public,
+          playSound: true,
+          enableVibration: true,
+          autoCancel: true,
         ),
         iOS: DarwinNotificationDetails(
           presentAlert: true,
@@ -242,10 +283,6 @@ class NotificationService {
 
   /// Schedule [_gymReminderSlots] one-shot alarms masing-masing berjarak
   /// [interval] dari yang sebelumnya — dimulai dari sekarang + interval.
-  ///
-  /// Pendekatan ini jauh lebih reliable daripada [periodicallyShowWithDuration]
-  /// karena setiap alarm sudah terdaftar di Android AlarmManager secara
-  /// independen, sehingga tidak terputus meski app di-kill.
   Future<void> scheduleGymReminderPeriodically({
     required Duration interval,
   }) async {
@@ -269,6 +306,10 @@ class NotificationService {
         importance: Importance.high,
         priority: Priority.high,
         icon: '@mipmap/ic_launcher',
+        visibility: NotificationVisibility.public,
+        playSound: true,
+        enableVibration: true,
+        autoCancel: true,
       ),
       iOS: DarwinNotificationDetails(
         presentAlert: true,
@@ -286,6 +327,9 @@ class NotificationService {
         details: details,
       );
     }
+
+    debugPrint(
+        'Scheduled $_gymReminderSlots gym reminders every ${interval.inSeconds}s');
   }
 
   /// Schedule a gym reminder after a custom duration.
@@ -317,9 +361,7 @@ class NotificationService {
 
   /// Cancel semua slot gym reminder (termasuk legacy single ID).
   Future<void> cancelGymReminder() async {
-    // Cancel legacy single ID
     await _plugin.cancel(gymReminderId);
-    // Cancel semua one-shot slots
     for (int i = 1; i <= _gymReminderSlots; i++) {
       await _plugin.cancel(_gymReminderBaseId + i);
     }
@@ -354,6 +396,7 @@ class NotificationService {
           channelDescription: 'Motivational notification',
           importance: Importance.low,
           icon: '@mipmap/ic_launcher',
+          autoCancel: true,
         ),
         iOS: const DarwinNotificationDetails(presentAlert: true),
       ),
@@ -365,4 +408,10 @@ class NotificationService {
   Future<void> cancelAll() async {
     await _plugin.cancelAll();
   }
+}
+
+// ✅ Top-level function wajib untuk background notification handler
+@pragma('vm:entry-point')
+void _onBackgroundNotificationTap(NotificationResponse response) {
+  debugPrint('Background notification tapped: ${response.id}');
 }

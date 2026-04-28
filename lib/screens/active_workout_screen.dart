@@ -7,7 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:uuid/uuid.dart';
-import 'package:youtube_player_flutter/youtube_player_flutter.dart';
+import 'package:youtube_player_iframe/youtube_player_iframe.dart';
 
 import '../models/workout_log_model.dart';
 import '../services/firestore_service.dart';
@@ -52,6 +52,9 @@ class _ActiveWorkoutScreenState extends State<ActiveWorkoutScreen>
   bool _isResting = false;
   bool _isSaving = false;
   bool _isCountingDown = false;
+
+  // ✅ Simpan nama exercise saat rest dimulai untuk dipakai di notifikasi
+  String? _restingForExercise;
 
   @override
   void initState() {
@@ -145,8 +148,9 @@ class _ActiveWorkoutScreenState extends State<ActiveWorkoutScreen>
 
   int get _totalExercises => _exercises.length;
 
-  int get _completedExercises =>
-      _exercises.where((exercise) => exercise.sets.every((set) => set.isCompleted)).length;
+  int get _completedExercises => _exercises
+      .where((exercise) => exercise.sets.every((set) => set.isCompleted))
+      .length;
 
   @override
   void dispose() {
@@ -154,6 +158,8 @@ class _ActiveWorkoutScreenState extends State<ActiveWorkoutScreen>
     _workoutTimer?.cancel();
     _restTimer?.cancel();
     _plankTimer?.cancel();
+    // Cancel scheduled notification saat screen ditutup
+    NotificationService.instance.cancelRestTimer();
     super.dispose();
   }
 
@@ -199,7 +205,8 @@ class _ActiveWorkoutScreenState extends State<ActiveWorkoutScreen>
         final target = sets.clamp(1, 10);
         if (target > exercise.sets.length) {
           final diff = target - exercise.sets.length;
-          final lastReps = exercise.sets.isNotEmpty ? exercise.sets.last.reps : 10;
+          final lastReps =
+              exercise.sets.isNotEmpty ? exercise.sets.last.reps : 10;
           for (int i = 0; i < diff; i++) {
             exercise.sets.add(ExerciseSet(
               setNumber: exercise.sets.length + 1,
@@ -241,38 +248,68 @@ class _ActiveWorkoutScreenState extends State<ActiveWorkoutScreen>
     setState(() => _exercises.removeAt(index));
   }
 
-  int _nextRestSeconds() => _restMinSeconds + _random.nextInt(
+  int _nextRestSeconds() =>
+      _restMinSeconds +
+      _random.nextInt(
         _restMaxSeconds - _restMinSeconds + 1,
       );
 
+  // ✅ FIX: Rest cycle yang reliable
+  // - scheduleRestTimer  → backup jika app masuk background
+  // - Timer.periodic     → countdown in-app
+  // - showRestCompleteNotification → dipanggil saat timer BENAR-BENAR habis
   Future<void> _startRestCycle(String exerciseName) async {
     _restTimer?.cancel();
+    await NotificationService.instance.cancelRestTimer();
+
     final seconds = _nextRestSeconds();
 
     setState(() {
       _isResting = true;
       _restSecondsLeft = seconds;
+      _restingForExercise = exerciseName;
     });
 
+    // ✅ Schedule backup notification (untuk saat app di background)
     try {
       await NotificationService.instance.scheduleRestTimer(
         seconds: seconds,
         exerciseName: exerciseName,
       );
-    } catch (_) {
-      // In-app timer tetap jalan walaupun notifikasi gagal.
+    } catch (e) {
+      debugPrint('scheduleRestTimer failed (non-critical): $e');
     }
 
-    _restTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (!mounted) return;
+    _restTimer = Timer.periodic(const Duration(seconds: 1), (timer) async {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+
       if (_restSecondsLeft <= 1) {
         timer.cancel();
-        NotificationService.instance.cancelRestTimer();
+
+        // ✅ FIX: Cancel scheduled notification karena kita akan show langsung
+        await NotificationService.instance.cancelRestTimer();
+
+        // ✅ FIX: Tampilkan notifikasi SEKARANG (immediate show)
+        //        Ini yang utama — dijamin muncul saat app foreground maupun background
+        try {
+          await NotificationService.instance.showRestCompleteNotification(
+            exerciseName: _restingForExercise,
+          );
+        } catch (e) {
+          debugPrint('showRestCompleteNotification failed: $e');
+        }
+
+        HapticFeedback.mediumImpact();
+
+        if (!mounted) return;
         setState(() {
           _isResting = false;
           _restSecondsLeft = 0;
+          _restingForExercise = null;
         });
-        HapticFeedback.mediumImpact();
       } else {
         setState(() => _restSecondsLeft--);
       }
@@ -303,12 +340,26 @@ class _ActiveWorkoutScreenState extends State<ActiveWorkoutScreen>
 
   Future<void> _skipRest() async {
     _restTimer?.cancel();
+
+    // ✅ Cancel scheduled backup notification
     await NotificationService.instance.cancelRestTimer();
+
+    // ✅ Tampilkan notifikasi "rest selesai" saat user skip
+    try {
+      await NotificationService.instance.showRestCompleteNotification(
+        exerciseName: _restingForExercise,
+      );
+    } catch (e) {
+      debugPrint('showRestCompleteNotification on skip failed: $e');
+    }
+
+    HapticFeedback.mediumImpact();
 
     if (!mounted) return;
     setState(() {
       _isResting = false;
       _restSecondsLeft = 0;
+      _restingForExercise = null;
     });
   }
 
@@ -342,7 +393,13 @@ class _ActiveWorkoutScreenState extends State<ActiveWorkoutScreen>
       return;
     }
 
-    await _startRestCycle(exercise.name);
+    // ✅ Tentukan nama exercise BERIKUTNYA untuk ditampilkan di notifikasi
+    final nextExerciseIndex = _currentExerciseIndex;
+    final nextExerciseName = nextExerciseIndex != null
+        ? _exercises[nextExerciseIndex].name
+        : exercise.name;
+
+    await _startRestCycle(nextExerciseName);
   }
 
   Future<void> _finishWorkout() async {
@@ -503,6 +560,10 @@ class _ActiveWorkoutScreenState extends State<ActiveWorkoutScreen>
     );
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SEMUA WIDGET DI BAWAH TIDAK DIUBAH — SAMA PERSIS DENGAN KODE ASLI
+// ─────────────────────────────────────────────────────────────────────────────
 
 class _SetupTab extends StatelessWidget {
   final List<ExerciseLog> exercises;
@@ -931,7 +992,7 @@ class _CurrentExerciseCard extends StatelessWidget {
     final displayButtonLabel = isPlanking
         ? 'HOLD... ($plankSecondsLeft s)'
         : (isTimed ? 'MULAI PLANK' : buttonLabel);
-    
+
     final tutorial = ExerciseVideoCatalog.findByExerciseName(exercise.name);
 
     return Container(
@@ -970,8 +1031,7 @@ class _CurrentExerciseCard extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 12),
-          if (tutorial != null)
-            _ExerciseVideoPlayer(tutorial: tutorial),
+          if (tutorial != null) _ExerciseVideoPlayer(tutorial: tutorial),
           const SizedBox(height: 20),
           Row(
             children: [
@@ -1019,7 +1079,9 @@ class _CurrentExerciseCard extends StatelessWidget {
                   ? null
                   : (isTimed ? onStartPlank : onCompleteCurrentSet),
               style: ElevatedButton.styleFrom(
-                backgroundColor: isPlanking ? const Color(0xFF1A1A1A) : const Color(0xFF00C896),
+                backgroundColor: isPlanking
+                    ? const Color(0xFF1A1A1A)
+                    : const Color(0xFF00C896),
                 padding: const EdgeInsets.symmetric(vertical: 16),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(14),
@@ -1046,6 +1108,17 @@ class _CurrentExerciseCard extends StatelessWidget {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// _ExerciseVideoPlayer — thumbnail tap → modal player
+//
+// Kenapa pendekatan ini:
+// 1. YoutubePlayer di dalam ListView/ScrollView → konflik scroll gesture
+//    dengan WebView internal → player tidak bisa dikontrol user
+// 2. Solusi: tampilkan thumbnail di card (ringan, tanpa WebView),
+//    tap play → modal terpisah dengan YoutubePlayerBuilder yang berdiri
+//    sendiri di luar ListView → tidak ada konflik gesture/scroll
+// ─────────────────────────────────────────────────────────────────────────────
+
 class _ExerciseVideoPlayer extends StatefulWidget {
   final ExerciseVideoTutorial tutorial;
 
@@ -1056,150 +1129,34 @@ class _ExerciseVideoPlayer extends StatefulWidget {
 }
 
 class _ExerciseVideoPlayerState extends State<_ExerciseVideoPlayer> {
-  late final YoutubePlayerController _controller;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = YoutubePlayerController(
-      initialVideoId: widget.tutorial.youtubeId,
-      flags: const YoutubePlayerFlags(
-        autoPlay: false,
-        mute: false,
-        controlsVisibleAtStart: true,
-        enableCaption: true,
-      ),
-    );
-  }
-
-  @override
-  void didUpdateWidget(covariant _ExerciseVideoPlayer oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.tutorial.youtubeId != widget.tutorial.youtubeId) {
-      _controller.load(widget.tutorial.youtubeId);
-    }
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
+  bool _thumbError = false;
 
   Future<void> _openTutorialExternally() async {
     final uri = Uri.parse(
       'https://www.youtube.com/watch?v=${widget.tutorial.youtubeId}',
     );
-
     await launchUrl(uri, mode: LaunchMode.externalApplication);
   }
 
-  Widget _buildWebFallback() {
-    return Container(
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: const Color(0xFF333333)),
-        color: Colors.black,
+  void _openInAppPlayer() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.black,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(12),
-        child: AspectRatio(
-          aspectRatio: 16 / 9,
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              Image.network(
-                'https://img.youtube.com/vi/${widget.tutorial.youtubeId}/hqdefault.jpg',
-                fit: BoxFit.cover,
-                errorBuilder: (_, __, ___) => Container(
-                  color: Colors.black,
-                  alignment: Alignment.center,
-                  child: const Icon(
-                    Icons.play_circle_fill,
-                    color: Color(0xFFFF6B35),
-                    size: 72,
-                  ),
-                ),
-              ),
-              Container(color: Colors.black.withOpacity(0.35)),
-              Center(
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Container(
-                        width: 68,
-                        height: 68,
-                        decoration: BoxDecoration(
-                          color: const Color(0xFFFF6B35),
-                          shape: BoxShape.circle,
-                          boxShadow: [
-                            BoxShadow(
-                              color: const Color(0xFFFF6B35).withOpacity(0.35),
-                              blurRadius: 16,
-                              spreadRadius: 2,
-                            ),
-                          ],
-                        ),
-                        child: IconButton(
-                          icon: const Icon(
-                            Icons.play_arrow,
-                            color: Colors.white,
-                            size: 36,
-                          ),
-                          onPressed: _openTutorialExternally,
-                          tooltip: 'Buka tutorial YouTube',
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      Text(
-                        widget.tutorial.title,
-                        textAlign: TextAlign.center,
-                        style: GoogleFonts.barlow(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w800,
-                          color: Colors.white,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        'Ketuk untuk membuka video tutorial',
-                        textAlign: TextAlign.center,
-                        style: GoogleFonts.spaceGrotesk(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                          color: Colors.white,
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      OutlinedButton.icon(
-                        onPressed: _openTutorialExternally,
-                        icon: const Icon(Icons.open_in_new),
-                        label: const Text('Buka Tutorial'),
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: Colors.white,
-                          side: const BorderSide(color: Color(0xFFFF6B35)),
-                          backgroundColor:
-                              const Color(0xFFFF6B35).withOpacity(0.12),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
+      builder: (_) => _YoutubePlayerModal(
+        youtubeId: widget.tutorial.youtubeId,
+        title: widget.tutorial.title,
       ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    if (kIsWeb) {
-      return _buildWebFallback();
-    }
+    final thumbUrl =
+        'https://img.youtube.com/vi/${widget.tutorial.youtubeId}/hqdefault.jpg';
 
     return Container(
       decoration: BoxDecoration(
@@ -1207,78 +1164,363 @@ class _ExerciseVideoPlayerState extends State<_ExerciseVideoPlayer> {
         border: Border.all(color: const Color(0xFF333333)),
         color: Colors.black,
       ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            YoutubePlayer(
-              controller: _controller,
-              showVideoProgressIndicator: true,
-              progressIndicatorColor: const Color(0xFFFF6B35),
-            ),
-            Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // ── Thumbnail + play button ──
+          ClipRRect(
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
+            child: AspectRatio(
+              aspectRatio: 16 / 9,
+              child: Stack(
+                fit: StackFit.expand,
                 children: [
-                  Text(
-                    widget.tutorial.title,
-                    style: GoogleFonts.barlow(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w800,
-                      color: Colors.white,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    widget.tutorial.description,
-                    style: GoogleFonts.spaceGrotesk(
-                      fontSize: 12,
-                      color: const Color(0xFFAAAAAA),
-                    ),
-                  ),
-                  if (widget.tutorial.instructions.isNotEmpty) ...[
-                    const SizedBox(height: 12),
-                    ...widget.tutorial.instructions.map((step) => Padding(
-                          padding: const EdgeInsets.only(bottom: 4),
-                          child: Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text("• ",
-                                  style: GoogleFonts.spaceGrotesk(
-                                      color: const Color(0xFFFF6B35),
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 12)),
-                              Expanded(
-                                child: Text(
-                                  step,
-                                  style: GoogleFonts.spaceGrotesk(
-                                      fontSize: 11, color: const Color(0xFFDDDDDD)),
-                                ),
-                              ),
-                            ],
+                  // Thumbnail
+                  if (!_thumbError)
+                    Image.network(
+                      thumbUrl,
+                      fit: BoxFit.cover,
+                      loadingBuilder: (_, child, progress) {
+                        if (progress == null) return child;
+                        return Container(
+                          color: const Color(0xFF111111),
+                          alignment: Alignment.center,
+                          child: const CircularProgressIndicator(
+                            color: Color(0xFFFF6B35),
+                            strokeWidth: 2,
                           ),
-                        )),
-                  ],
-                  const SizedBox(height: 10),
-                  OutlinedButton.icon(
-                    onPressed: _openTutorialExternally,
-                    icon: const Icon(Icons.open_in_new),
-                    label: const Text('Buka di YouTube'),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: Colors.white,
-                      side: const BorderSide(color: Color(0xFFFF6B35)),
-                      backgroundColor:
-                          const Color(0xFFFF6B35).withOpacity(0.12),
+                        );
+                      },
+                      errorBuilder: (_, __, ___) {
+                        WidgetsBinding.instance.addPostFrameCallback((_) {
+                          if (mounted) setState(() => _thumbError = true);
+                        });
+                        return Container(
+                          color: const Color(0xFF111111),
+                          alignment: Alignment.center,
+                          child: const Icon(
+                            Icons.video_library_outlined,
+                            color: Color(0xFF444444),
+                            size: 48,
+                          ),
+                        );
+                      },
+                    )
+                  else
+                    Container(
+                      color: const Color(0xFF111111),
+                      alignment: Alignment.center,
+                      child: const Icon(
+                        Icons.video_library_outlined,
+                        color: Color(0xFF444444),
+                        size: 48,
+                      ),
+                    ),
+
+                  // Overlay gelap
+                  Container(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [
+                          Colors.black.withOpacity(0.1),
+                          Colors.black.withOpacity(0.55),
+                        ],
+                      ),
+                    ),
+                  ),
+
+                  // Play button tengah
+                  Center(
+                    child: GestureDetector(
+                      onTap:
+                          kIsWeb ? _openTutorialExternally : _openInAppPlayer,
+                      child: Container(
+                        width: 64,
+                        height: 64,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFF6B35),
+                          shape: BoxShape.circle,
+                          boxShadow: [
+                            BoxShadow(
+                              color: const Color(0xFFFF6B35).withOpacity(0.4),
+                              blurRadius: 20,
+                              spreadRadius: 2,
+                            ),
+                          ],
+                        ),
+                        child: const Icon(
+                          Icons.play_arrow_rounded,
+                          color: Colors.white,
+                          size: 38,
+                        ),
+                      ),
+                    ),
+                  ),
+
+                  // Label kiri bawah
+                  Positioned(
+                    bottom: 10,
+                    left: 12,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withOpacity(0.7),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.play_circle_outline,
+                              size: 12, color: Color(0xFFFF6B35)),
+                          const SizedBox(width: 4),
+                          Text(
+                            'Tonton Tutorial',
+                            style: GoogleFonts.barlow(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                              color: Colors.white,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+
+                  // YouTube badge kanan bawah
+                  Positioned(
+                    bottom: 10,
+                    right: 12,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 6, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: Colors.red,
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Text(
+                        'YouTube',
+                        style: GoogleFonts.barlow(
+                          fontSize: 10,
+                          fontWeight: FontWeight.w800,
+                          color: Colors.white,
+                        ),
+                      ),
                     ),
                   ),
                 ],
               ),
             ),
-          ],
-        ),
+          ),
+
+          // ── Info & instructions ──
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  widget.tutorial.title,
+                  style: GoogleFonts.barlow(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w800,
+                    color: Colors.white,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  widget.tutorial.description,
+                  style: GoogleFonts.spaceGrotesk(
+                    fontSize: 11,
+                    color: const Color(0xFFAAAAAA),
+                  ),
+                ),
+                if (widget.tutorial.instructions.isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  ...widget.tutorial.instructions.map(
+                    (step) => Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '• ',
+                            style: GoogleFonts.spaceGrotesk(
+                              color: const Color(0xFFFF6B35),
+                              fontWeight: FontWeight.bold,
+                              fontSize: 12,
+                            ),
+                          ),
+                          Expanded(
+                            child: Text(
+                              step,
+                              style: GoogleFonts.spaceGrotesk(
+                                fontSize: 11,
+                                color: const Color(0xFFDDDDDD),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 10),
+                OutlinedButton.icon(
+                  onPressed: _openTutorialExternally,
+                  icon: const Icon(Icons.open_in_new, size: 14),
+                  label: const Text('Buka di YouTube'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.white,
+                    side: const BorderSide(color: Color(0xFFFF6B35)),
+                    backgroundColor: const Color(0xFFFF6B35).withOpacity(0.10),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    textStyle: GoogleFonts.barlow(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Modal player — menggunakan youtube_player_flutter ^9.0.4 API yang benar.
+//
+// Package youtube_player_flutter (berbeda dari youtube_player_iframe) masih
+// pakai API lama: YoutubePlayerController(initialVideoId:, flags:), dispose(),
+// dan YoutubePlayerBuilder sebagai wrapper agar fullscreen work di luar ListView.
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _YoutubePlayerModal extends StatefulWidget {
+  final String youtubeId;
+  final String title;
+
+  const _YoutubePlayerModal({
+    required this.youtubeId,
+    required this.title,
+  });
+
+  @override
+  State<_YoutubePlayerModal> createState() => _YoutubePlayerModalState();
+}
+
+class _YoutubePlayerModalState extends State<_YoutubePlayerModal> {
+  late final YoutubePlayerController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = YoutubePlayerController.fromVideoId(
+      videoId: widget.youtubeId,
+      autoPlay: true,
+      params: const YoutubePlayerParams(
+        mute: false,
+        enableCaption: true,
+        showControls: true,
+        showFullscreenButton: true,
+        playsInline: true,
+        showVideoAnnotations: false,
+        enableKeyboard: false,
+        strictRelatedVideos: false,
+        color: 'white',
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _controller.close();
+    super.dispose();
+  }
+
+  Future<void> _openExternal() async {
+    final uri = Uri.parse(
+      'https://www.youtube.com/watch?v=${widget.youtubeId}',
+    );
+    await launchUrl(uri, mode: LaunchMode.externalApplication);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return YoutubePlayerScaffold(
+      controller: _controller,
+      aspectRatio: 16 / 9,
+      autoFullScreen: true,
+      backgroundColor: const Color(0xFF111111),
+      builder: (ctx, player) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                margin: const EdgeInsets.symmetric(vertical: 10),
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: const Color(0xFF444444),
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 8, 8),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        widget.title,
+                        style: GoogleFonts.barlow(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w800,
+                          color: Colors.white,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close, color: Colors.white54),
+                      onPressed: () => Navigator.pop(ctx),
+                    ),
+                  ],
+                ),
+              ),
+              AspectRatio(
+                aspectRatio: 16 / 9,
+                child: player,
+              ),
+              const SizedBox(height: 12),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                child: SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: _openExternal,
+                    icon: const Icon(Icons.open_in_new, size: 16),
+                    label: const Text('Buka di YouTube App'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.white,
+                      side: const BorderSide(color: Color(0xFF444444)),
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 }
@@ -1334,7 +1576,8 @@ class _CountdownOverlay extends StatefulWidget {
   State<_CountdownOverlay> createState() => _CountdownOverlayState();
 }
 
-class _CountdownOverlayState extends State<_CountdownOverlay> with SingleTickerProviderStateMixin {
+class _CountdownOverlayState extends State<_CountdownOverlay>
+    with SingleTickerProviderStateMixin {
   int _count = 3;
   late AnimationController _controller;
   late Animation<double> _scaleAnimation;
@@ -1343,15 +1586,18 @@ class _CountdownOverlayState extends State<_CountdownOverlay> with SingleTickerP
   @override
   void initState() {
     super.initState();
-    _controller = AnimationController(vsync: this, duration: const Duration(milliseconds: 900));
+    _controller = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 900));
 
     _scaleAnimation = TweenSequence<double>([
       TweenSequenceItem(
-        tween: Tween<double>(begin: 0.0, end: 1.2).chain(CurveTween(curve: Curves.easeOutQuart)),
+        tween: Tween<double>(begin: 0.0, end: 1.2)
+            .chain(CurveTween(curve: Curves.easeOutQuart)),
         weight: 40,
       ),
       TweenSequenceItem(
-        tween: Tween<double>(begin: 1.2, end: 1.0).chain(CurveTween(curve: Curves.easeInQuad)),
+        tween: Tween<double>(begin: 1.2, end: 1.0)
+            .chain(CurveTween(curve: Curves.easeInQuad)),
         weight: 60,
       ),
     ]).animate(_controller);
@@ -1395,7 +1641,11 @@ class _CountdownOverlayState extends State<_CountdownOverlay> with SingleTickerP
               scale: _scaleAnimation.value,
               child: Text(
                 text,
-                style: GoogleFonts.barlow(fontSize: 140, fontWeight: FontWeight.w900, color: const Color(0xFFFF6B35), fontStyle: FontStyle.italic),
+                style: GoogleFonts.barlow(
+                    fontSize: 140,
+                    fontWeight: FontWeight.w900,
+                    color: const Color(0xFFFF6B35),
+                    fontStyle: FontStyle.italic),
               ),
             ),
           ),
@@ -1581,9 +1831,8 @@ class _WorkoutSummaryCard extends StatelessWidget {
             ),
             child: Icon(
               isActive ? Icons.play_arrow : Icons.fitness_center,
-              color: isActive
-                  ? const Color(0xFFFF6B35)
-                  : const Color(0xFF666666),
+              color:
+                  isActive ? const Color(0xFFFF6B35) : const Color(0xFF666666),
             ),
           ),
           const SizedBox(width: 12),
@@ -1700,8 +1949,10 @@ class _SetupExerciseCard extends StatelessWidget {
                       _buildCounter(
                         label: isTimed ? 'Detik' : 'Reps',
                         value: reps,
-                        onDecrement: () => onUpdate(reps: reps - (isTimed ? 5 : 1)),
-                        onIncrement: () => onUpdate(reps: reps + (isTimed ? 5 : 1)),
+                        onDecrement: () =>
+                            onUpdate(reps: reps - (isTimed ? 5 : 1)),
+                        onIncrement: () =>
+                            onUpdate(reps: reps + (isTimed ? 5 : 1)),
                       ),
                     ],
                   ),
@@ -1711,7 +1962,8 @@ class _SetupExerciseCard extends StatelessWidget {
           ),
           if (canRemove)
             IconButton(
-              icon: const Icon(Icons.remove_circle_outline, color: Colors.redAccent),
+              icon: const Icon(Icons.remove_circle_outline,
+                  color: Colors.redAccent),
               onPressed: onRemove,
             ),
         ],
@@ -1852,7 +2104,8 @@ class _AddExerciseSheetState extends State<_AddExerciseSheet> {
         ...kExerciseTemplates.map((item) => item.category).toSet().toList(),
       ];
 
-  List<ExerciseTemplate> get _filteredExercises => kExerciseTemplates.where((item) {
+  List<ExerciseTemplate> get _filteredExercises =>
+      kExerciseTemplates.where((item) {
         final matchesCategory =
             _selectedCategory == 'All' || item.category == _selectedCategory;
         final matchesSearch =

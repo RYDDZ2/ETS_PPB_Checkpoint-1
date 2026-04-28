@@ -13,7 +13,15 @@
     <application
         android:label="gymform3"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:usesCleartextTraffic="true">
+        <!--
+            ✅ FIX 1: android:usesCleartextTraffic="true"
+            youtube_player_flutter v9.x menggunakan iframe WebView yang
+            memuat konten via HTTP biasa (bukan HTTPS) di beberapa endpoint.
+            Tanpa flag ini, Android 9+ (API 28+) memblokir request tersebut
+            dan player gagal load → hanya muncul thumbnail / "Video not available".
+        -->
 
         <receiver
             android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver"
@@ -51,7 +59,23 @@
             android:value="2" />
     </application>
 
+    <!--
+        ✅ FIX 2: queries block lengkap
+        Android 11+ (API 30+) memerlukan deklarasi eksplisit app/intent
+        yang boleh di-query. Tambahkan YouTube agar launchUrl() bisa
+        membuka YouTube app langsung (fallback "Buka di YouTube").
+    -->
     <queries>
+        <!-- Untuk url_launcher: buka YouTube app atau browser -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="https" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="http" />
+        </intent>
+        <!-- Untuk fitur process text (existing) -->
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT" />
             <data android:mimeType="text/plain" />
